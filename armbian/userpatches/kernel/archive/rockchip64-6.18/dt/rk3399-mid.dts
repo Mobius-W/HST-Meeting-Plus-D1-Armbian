@@ -113,52 +113,35 @@
 	};
 
 	/*
-	 * eDP 面板：
-	 *   vendor  display-timings timing0（1920x1080@60Hz）
-	 *     clock=138500000, hactive=1920, hfp=120, hbp=32, hsync=8
-	 *     vactive=1080, vfp=23, vbp=6, vsync=2
-	 *   全部极性 active-low（vendor 值 0x00）
-	 *   复位脚：vendor lcd_rst = gpio3 RK_PA4
-	 *   power-supply：暂用 vcc3v3_s0（与 excavator 一致）
+	 * eDP 面板 —— 2026-11-16 结构性重写。
+	 *
+	 * ⛔ 旧写法 `edp-panel { compatible = "simple-panel"; }` 在内核 6.18 下永不生效：
+	 *    1) panel-simple.c 已删除 generic "simple-panel" 匹配（of_match 里已无此项）；
+	 *    2) 即便匹配上，panel_simple_probe() 对 DRM_MODE_CONNECTOR_eDP 直接
+	 *       返回 -EINVAL，日志 "eDP panels moved to panel-edp"。
+	 *    ⇒ 实测现象：edp-panel 无 driver，/sys/class/drm 只有 panfrost 的 card0，
+	 *      rockchip-dp 因找不到 panel 而永久 deferred，屏幕黑。
+	 *
+	 * ✅ 现代正确写法：panel-edp 的 generic "edp-panel" 只支持挂在 DP AUX 总线上
+	 *    （panel-edp.c: "Skip one since \"edp-panel\" is only supported on DP AUX bus"）。
+	 *    因此面板节点必须移到 &edp 的 aux-bus 里，由 aux 总线枚举，
+	 *    时序由 eDP AUX 读 EDID 得到（eDP 规范强制要求 EDID）。
+	 *    vendor 的固定时序（138.5MHz / 1920x1080）由 EDID 覆盖，无需手写。
 	 */
-	edp_panel: edp-panel {
-		compatible = "simple-panel";
-		backlight = <&backlight>;
-		power-supply = <&vcc3v3_s0>;
-		enable-gpios = <&gpio3 RK_PA4 GPIO_ACTIVE_HIGH>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&lcd_panel_reset>;
-
-		display-timings {
-			native-mode = <&panel_timing>;
-
-			panel_timing: timing0 {
-				clock-frequency = <138500000>;
-				hactive = <1920>;
-				hfront-porch = <120>;
-				hback-porch = <32>;
-				hsync-len = <8>;
-				vactive = <1080>;
-				vfront-porch = <23>;
-				vback-porch = <6>;
-				vsync-len = <2>;
-				hsync-active = <0>;
-				vsync-active = <0>;
-				de-active = <0>;
-				pixelclk-active = <0>;
-			};
-		};
-
-		port {
-			panel_in_edp: endpoint {
-				remote-endpoint = <&edp_out_panel>;
-			};
-		};
-	};
-
 	/*
-	 * 音频：ES8316 @ i2c1 0x11（vendor 实测）
-	 *   vendor 还有 es7243@0x10 / es7243@0x12（麦克风阵列 ADC），mainline 无驱动，先不挂。
+	 * 音频路由 —— 2026-11-16 按 es8316.c 实际 DAPM 表重写。
+	 *
+	 * ⛔ 旧写法用的是 ES8388/ES8328 的 widget 名（MICBIAS1 / IN1P / SPKOL / SPKOR），
+	 *    而 mainline es8316.c 里只有：
+	 *      INPUT:  DMIC / MIC1 / MIC2
+	 *      OUTPUT: HPOL / HPOR            ← 没有 SPKOL/SPKOR
+	 *      SUPPLY: "Bias" / "Analog power" / "Mic Bias"   ← 没有 MICBIAS1
+	 *    实测 dmesg 四条 "Failed to add route ..." 正是这个原因，
+	 *    加上 card 注册直接挂掉（no soundcards）。
+	 *
+	 * 本板硬件：ES8316 的 HPOL/HPOR 一路接耳机，一路接 SN3732A 功放推喇叭，
+	 * 所以 Speaker 也从 HPOL/HPOR 取。麦克风走 codec 内部 MIC1/MIC2，
+	 * DTS 不需要（也不应该）重复声明。
 	 */
 	es8316_sound: es8316-sound {
 		compatible = "simple-audio-card";
@@ -166,16 +149,13 @@
 		simple-audio-card,format = "i2s";
 		simple-audio-card,mclk-fs = <256>;
 		simple-audio-card,widgets =
-			"Microphone", "Mic Jack",
 			"Headphone", "Headphone Jack",
 			"Speaker", "Speaker";
 		simple-audio-card,routing =
-			"Mic Jack", "MICBIAS1",
-			"IN1P", "Mic Jack",
 			"Headphone Jack", "HPOL",
 			"Headphone Jack", "HPOR",
-			"Speaker", "SPKOL",
-			"Speaker", "SPKOR";
+			"Speaker", "HPOL",
+			"Speaker", "HPOR";
 
 		simple-audio-card,cpu {
 			sound-dai = <&i2s0>;
@@ -202,15 +182,25 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&edp_hpd>;
 	status = "okay";
-};
 
-&edp_out {
-	edp_out_panel: endpoint {
-		remote-endpoint = <&panel_in_edp>;
+	/*
+	 * 面板挂在 AUX 总线上（panel-edp generic "edp-panel" 的唯一合法位置）。
+	 * 时序来自 EDID；power-supply 对应 vendor 的 PMIC SWITCH_REG2（= vcc3v3_s0）。
+	 * 注意：vendor DTB 里面板没有 enable/reset GPIO，此前 DTS 里的
+	 * gpio3 RK_PA4 是推测值，且该脚实际归 GMAC（fe300000.ethernet），
+	 * 抢占会导致 pinctrl -EINVAL，已彻底删除。
+	 */
+	aux-bus {
+		panel: panel {
+			compatible = "edp-panel";
+			backlight = <&backlight>;
+			power-supply = <&vcc3v3_s0>;
+			status = "okay";
+		};
 	};
 };
 
-/* ---------------- I2C1：ES8316 音频 ---------------- */
+/* ---------------- I2C1：ES8316 音频 + ES7243 麦阵 ---------------- */
 &i2c1 {
 	i2c-scl-rising-time-ns = <300>;
 	i2c-scl-falling-time-ns = <15>;
@@ -225,6 +215,56 @@
 		spk-con-gpio = <&gpio4 RK_PD1 GPIO_ACTIVE_HIGH>;
 		amp-en-gpio = <&gpio4 RK_PA5 GPIO_ACTIVE_HIGH>;
 	};
+
+	/*
+	 * 2026-11-16 实物扫描确认：i2c-1 上 0x10 / 0x12 均有设备应答
+	 * （ES8316 的 0x11 反而无应答，属硬件供电/复位问题，见交付报告）。
+	 * 按硬件清单补上两颗 ES7243 麦阵 ADC 节点，让 I2C 侧可见。
+	 * 注意：mainline 无 es7243 驱动，节点仅用于标识，不会有 driver 绑定。
+	 */
+	es7243_0: audio-codec@10 {
+		compatible = "everest,es7243";
+		reg = <0x10>;
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+	es7243_1: audio-codec@12 {
+		compatible = "everest,es7243";
+		reg = <0x12>;
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+};
+
+/* ---------------- I2C6：SN3732A 功放 ×3（ff150000）---------------- */
+/*
+ * 硬件清单：SN3732A ×3 @ 0x50 / 0x52 / 0x53，0x50 那颗带 enable-gpio
+ * GPIO2 RK_PB0。mainline 无驱动，先让总线可用（可用 i2cdetect 验证硬件），
+ * 驱动后续自写。
+ */
+&i2c6 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	amp@50 {
+		compatible = "si-en,sn3732a";
+		reg = <0x50>;
+		enable-gpio = <&gpio2 RK_PB0 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+
+	amp@52 {
+		compatible = "si-en,sn3732a";
+		reg = <0x52>;
+		status = "okay";
+	};
+
+	amp@53 {
+		compatible = "si-en,sn3732a";
+		reg = <0x53>;
+		status = "okay";
+	};
 };
 
 /* ---------------- I2C2：Goodix GT9xx 触摸 ---------------- */
@@ -238,10 +278,17 @@
 		reg = <0x5d>;
 		interrupt-parent = <&gpio2>;
 		interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
-		irq-gpios = <&gpio2 RK_PA7 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&gpio4 RK_PC6 GPIO_ACTIVE_HIGH>;
+		/*
+		 * 2026-11-16 修正：原来 pinctrl-0 = <&touch_int &lcd_panel_reset>，
+		 * 而 lcd_panel_reset 是 gpio3 RK_PA4，该脚已被 fe300000.ethernet(GMAC) 申请，
+		 * 导致 pinctrl 报 "pin gpio3-4 already requested by fe300000.ethernet"
+		 * → probe -EINVAL，触摸完全没有 driver。
+		 * vendor DTB 中触摸只用了中断脚，没有额外 reset pinctrl，故只保留 touch_int。
+		 * 同时删除与 interrupts 重复的 irq-gpios（同一 GPIO 两种声明会冲突）。
+		 */
 		pinctrl-names = "default";
-		pinctrl-0 = <&touch_int &lcd_panel_reset>;
+		pinctrl-0 = <&touch_int>;
 		touchscreen-size-x = <1920>;
 		touchscreen-size-y = <1080>;
 		status = "okay";
@@ -303,12 +350,6 @@
 		};
 	};
 
-	lcd-panel {
-		lcd_panel_reset: lcd-panel-reset {
-			rockchip,pins = <3 RK_PA4 RK_FUNC_GPIO &pcfg_pull_none>;
-		};
-	};
-
 	touch {
 		touch_int: touch-int {
 			rockchip,pins = <2 RK_PA7 RK_FUNC_GPIO &pcfg_pull_up>;
@@ -336,6 +377,37 @@
 &gmac {
 	tx_delay = <0x2d>;
 	rx_delay = <0x22>;
+};
+
+/* ---------------- USB2 PHY：修 phy-supply 死锁 ---------------- */
+/*
+ * 2026-11-16 实测根因：usb2phy@e450 的 host-port 上
+ *   phy-supply = <&vcc5v0_typec0>
+ * 而 vcc5v0_typec0 这个 regulator-fixed（gpio2 RK_PA0）在本板注册失败，
+ * /sys/class/regulator 里根本没有它 ⇒ phy_create() 里
+ * regulator_get_optional("phy") 返回 -EPROBE_DEFER ⇒
+ *   devm_phy_create() 失败 ⇒ "rockchip-usb2phy: failed to create phy"
+ * ⇒ fe800000(OTG) / fe380000 / fe3a0000 三个 USB 控制器全部 deferred，
+ *    只有 fe900000(USB3 Host) 和 fe3c0000/fe3e0000 那一组起来了。
+ *
+ * 本板硬件清单里没有 Type-C，vcc5v0_typec0 本就是 Sapphire 参考设计的冗余，
+ * 改指向已注册且 always-on 的 vcc5v0_host 即可解开死锁。
+ */
+&usb2phy0_host {
+	phy-supply = <&vcc5v0_host>;
+	status = "okay";
+};
+
+&usb2phy0_otg {
+	status = "okay";
+};
+
+&usb2phy1_host {
+	status = "okay";
+};
+
+&usb2phy1_otg {
+	status = "okay";
 };
 
 /* ---------------- 关闭本板不存在的设备 ---------------- */
