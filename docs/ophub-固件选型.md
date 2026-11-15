@@ -8,7 +8,9 @@
 > - **§一 结论、§三 硬件对照表的「内存」行与「TN3399 胜出的决定性理由」、§八「不要选 rockpi4b 因为 LPDDR4」全部作废**；§七 里以 DDR3 为卖点的备选板型理由同步作废。
 > - 本文 §二 / §十 / §十一～§十五 的**实测布局、坐标、PARM/GPT 冲突、IDB 与 Loader +8192 偏移**等事实与 DDR 类型无关，**继续有效**，保留作证据链。
 > - **新的选型结论见本文 §十六**（2026-11-15 重选：LPDDR4 + vendor `uboot.img` LOADER 阵营），权威基线为 armbian 源码与官方 board 规范。
+> - ⚠️ **22:0x 补充判定（见 `docs/引导机制判定-20261115.md`）**：§十六 选出的 r432 AIO-3399C 属 **ophub 混搭引导派**（IDB@LBA64 + `LOADER`@16384 + `BL3X`@24576 + GPT），与 armbian 官方已验证的 mainline 派（rockpi4b ≡ WF7000A：`u-boot-rockchip.bin`@64 + FIT@16384 + MBR）**并不一致**。⇒ **ophub 参照只用于 LPDDR4/8G eMMC 的硬件适配与格式交叉验证，绝不作为引导链基线**；编译基线以 armbian 官方 board 配置（`BOOT_SCENARIO` + 官方 `write_uboot_platform()` 产物分派）为准。
 > - ⚠️ **阅读规则**：§一～§九 的 DDR3 结论为**历史原文保留、未逐行改写**，一律不作准（§三 对照表「内存」行、§三「TN3399 胜出的决定性理由」、§七 DDR3 备选理由、§八 排除 rockpi4b 的 LPDDR4 理由尤其如此）。完整作废清单见 §16.5。
+> - ★ **22:2x 路径决策**：用户拍板**路径 1 优先**（armbian 官方 mainline + rockpi4b 写法），本文件 §十六 的 ophub 混搭布局**降级为路径 2 备案**——仅当路径 1 编译产物结构正确、排除 boot0/OTG/DTB 等外部因素后多次实刷仍失败，才考虑切换。判据与切换步骤见 `docs/引导机制判定-20261115.md` §五。
 
 > 生成时间：2026-11-11 12:2x
 > 数据源：`ophub/amlogic-s9xxx-armbian` Release `Armbian_trixie_arm64_server_2026.11`、`model_database.conf`（`r401`–`r441`）、`ophub/u-boot`、`build-armbian/.../bootfs/dtb/rockchip/` 下 50 份 rk3399 DTB 逐份解析；本板基准来自 `armbian/硬件清单-详尽版.md` 与 `docs/vendor-dtb-facts.md`。

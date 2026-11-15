@@ -1,7 +1,10 @@
-name: Build Armbian image (RK3399-MID)
+name: Build Armbian image (RK3399-MID, mainline boot)
 
 # 在 GitHub Actions 上用官方 armbian/build 源码编译 RK3399-MID 的完整 Armbian 镜像。
-# 官方编译容器镜像：ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
+# ★ 2026-11-15 路径1：引导链完全对齐 armbian 官方 rockpi-4b（binman-atf-mainline），
+#   产物 = 单个 u-boot-rockchip.bin 写到 LBA64；LBA64 IDB / LBA16384 FIT / MBR p1@32768。
+#   不产出 vendor PARM / LOADER@8192 / BL3X@16384，也不再有 -parm 变体。
+#   旧的 vendor only-blobs 版留档 docs/_废弃-vendor-only-blobs-workflow-20261115.yml.bak
 # 板级配置来源：本仓库 armbian/userpatches/（免 fork armbian/build）
 
 on:
@@ -21,7 +24,6 @@ on:
   push:
     paths:
       - "armbian/**"
-      - "tools/mk-parm-variant.py"
       - ".github/workflows/build-armbian.yml"
     branches: [main]
 
@@ -67,6 +69,9 @@ jobs:
             rsync -a os/userpatches/ build/userpatches/
           fi
           rsync -a custom/armbian/userpatches/ build/userpatches/
+          # add-trust-ini.patch 是 vendor only-blobs 的 trust_merger 依赖（新增 trust.ini），
+          # mainline binman-atf-mainline 不用它；显式排除，避免旧路线残留进入补丁序列。
+          rm -f build/userpatches/u-boot/v2026.10/add-trust-ini.patch
           echo "=== userpatches 清单 ==="
           find build/userpatches -type f | sort
           echo
@@ -97,7 +102,7 @@ jobs:
             SHARE_LOG=yes \
             EXPERT=yes
 
-      # ---------- 5. 产物自检 ----------
+      # ---------- 5. 产物自检（官方 mainline 引导锚点） ----------
       - name: Verify artifacts
         run: |
           set -euo pipefail
@@ -108,8 +113,6 @@ jobs:
           echo "=== armbian u-boot deb ==="
           ls -la output/debs/*u-boot* 2>/dev/null || true
 
-          # armbian 把 uboot.img / trust.bin 打进 linux-u-boot-<board>-<branch>.deb，
-          # 解出来才能看魔数、也才能作为单独产物留存。
           mkdir -p ubootpkg
           for DEB in output/debs/linux-u-boot-rk3399-mid-*.deb; do
             [ -e "$DEB" ] || continue
@@ -118,109 +121,116 @@ jobs:
           done
 
           echo
-          echo "=== 引导件 ==="
-          find ubootpkg -type f \( -name 'uboot.img' -o -name 'trust.bin' -o -name 'idbloader.bin' \) \
-            -exec ls -la {} \; || true
-
-          for f in $(find ubootpkg -type f \( -name 'uboot.img' -o -name 'trust.bin' \) | sort); do
-            echo "--- $f  (头 32B)"
-            xxd -l 32 "$f"
-          done
+          echo "=== 引导件（mainline 必须是单一 u-boot-rockchip.bin） ==="
+          find ubootpkg -type f | sort
+          UBIN=$(find ubootpkg -type f -name 'u-boot-rockchip.bin' | head -1 || true)
+          if [ -z "$UBIN" ]; then
+            echo "::error::缺少 u-boot-rockchip.bin => BOOT_SCENARIO 未走 binman-atf-mainline"
+            exit 1
+          fi
+          echo "--- $UBIN ($(stat -c%s "$UBIN") B)"
+          xxd -l 32 "$UBIN"
+          if find ubootpkg -type f \( -name 'uboot.img' -o -name 'trust.bin' -o -name 'idbloader.bin' \) | grep -q .; then
+            echo "::error::deb 仍在产出 vendor only-blobs 三件套，方向未切换"
+            exit 1
+          fi
 
           IMG=$(ls output/images/*.img 2>/dev/null | head -1 || true)
-          if [ -n "$IMG" ]; then
-            echo "=== $IMG 关键扇区魔数 ==="
-            python3 - "$IMG" <<'PY'
-          import sys, os
+          if [ -z "$IMG" ]; then
+            echo "::error::output/images 下没有产出 .img"
+            exit 1
+          fi
+          echo "=== $IMG 关键扇区魔数 ==="
+          python3 - "$IMG" <<'PY'
+          import sys, os, struct
           p = sys.argv[1]
           f = open(p, "rb")
 
           def peek(lba, n=32):
-              f.seek(lba*512)
+              f.seek(lba * 512)
               return f.read(n)
 
           checks = [
-              (0,     "PARM / MBR 区"),
-              (1,     "GPT 头区"),
-              (64,    "IDB (BootROM 首级, 必须非空)"),
-              (8192,  "LOADER (uboot.img)"),
-              (16384, "BL3X  (trust.bin)"),
-              (24576, "trust 备用区"),
+              (0,     "MBR (p1@32768)"),
+              (1,     "LBA1 (应为空)"),
+              (64,    "IDB: DDR blob TPL + SPL"),
+              (8192,  "vendor LOADER 位（应全零）"),
+              (16384, "mainline FIT (TF-A + U-Boot)"),
+              (24576, "vendor trust 位（应全零）"),
               (32768, "p1 起点"),
           ]
           for lba, name in checks:
               d = peek(lba)
               txt = "".join(chr(b) if 32 <= b < 127 else "." for b in d)
-              print(f"  LBA {lba:>6}  {name:<30} {d[:8].hex(' ')}  {txt[:8]}")
+              print(f"  LBA {lba:>6}  {name:<32} {d[:8].hex(' ')}  {txt[:8]}")
           print(f"  image size = {os.path.getsize(p)/1048576:.1f} MiB")
 
-          # ★ 2026-11-15 硬校验（坑①②③）：以前的镜像 LBA64 全零、坐标三份互不相同，
-          #   刷完必然进 MaskROM。这里 fail-fast，杜绝再产出"看起来编译成功但刷了就砖"的镜像。
+          # 路径1硬校验：与官方 rockpi-4b / WF7000A 实盘的引导锚点一致
           errors = []
-          if peek(64, 16) == b"\x00" * 16:
-              errors.append("LBA64 首级 IDB 全零 -> 刷后必进 MaskROM（需 write_uboot_platform 写 idbloader.bin @64）")
-          if peek(8192, 8)[:6] != b"LOADER":
-              errors.append("LBA8192 缺少 LOADER 魔数 -> miniloader 找不到 uboot.img（本板实测坐标）")
-          if peek(16384, 8)[:4] != b"BL3X":
-              errors.append("LBA16384 缺少 BL3X 魔数 -> miniloader 找不到 trust.bin（本板实测坐标）")
-          trust_hdr = peek(16384, 16)
-          seg = trust_hdr[14] if len(trust_hdr) >= 15 else 0
-          print(f"  trust 段数 = {seg}  (头 12..15 = {trust_hdr[12:16].hex(' ')}；"
-                f"mainline 3 段为 ec 00 03 00 / 本板原厂 4 段为 f8 00 04 00)")
-          if seg != 4:
-              print("::warning::本板 vendor miniloader 期望 4 段 trust（含 bl30/bl32）；"
-                    "armbian only-blobs 默认产出 3 段，TTL 曾报 'No find bl30.bin/bl32.bin'。"
-                    "此为已知待验证项，需用 stock/trust.img 变体实测分流，不静默通过。")
+          l0 = peek(0, 512)
+          if l0[510:512] != b"\x55\xaa":
+              errors.append("LBA0 无 MBR 签名 55aa（官方 mainline 镜像为 MBR，p1@32768）")
+          if peek(64, 4) != bytes.fromhex("3b8cdcfc"):
+              errors.append("LBA64 缺少 Rockchip IDB 魔数 3b8cdcfc -> BootROM 找不到首级引导")
+          fit = peek(16384, 4096)
+          if fit[:4] != bytes.fromhex("d00dfeed"):
+              errors.append("LBA16384 缺少 FIT 魔数 d00dfeed -> mainline U-Boot 未落盘")
+          if peek(8192, 6) == b"LOADER":
+              errors.append("LBA8192 仍有 vendor LOADER -> 仍在 only-blobs 路线")
+          if peek(24576, 4) == b"BL3X":
+              errors.append("LBA24576 仍有 vendor BL3X trust -> 仍在 only-blobs 路线")
+          total = struct.unpack_from(">I", fit, 4)[0]
+          print(f"  FIT totalsize = {total} B；含 TF-A 节点 = "
+                f"{b'arm-trusted-firmware' in fit}；含 vendor bl30/bl32 = "
+                f"{b'bl30' in fit or b'bl32' in fit}")
+          if b"arm-trusted-firmware" not in fit:
+              errors.append("FIT 内没有 mainline TF-A 镜像节点 -> binman-atf-mainline 未生效")
           if errors:
               for e in errors:
                   print(f"::error::{e}")
               sys.exit(1)
-          print("::notice::引导锚点硬校验 PASS：LBA64 IDB / LBA8192 LOADER / LBA16384 BL3X")
+          print("::notice::mainline 引导锚点硬校验 PASS：MBR / LBA64 IDB / LBA16384 FIT，且无 vendor 容器")
           PY
-          else
-            echo "::error::output/images 下没有产出 .img"
-            exit 1
-          fi
 
-      # ---------- 6. 生成「保留原厂 PARM」变体 ----------
-      # 本板 boot0 miniloader 靠 user 区 LBA0 的 Rockchip parameter 里的 mtdparts
-      # 定位 uboot@0x2000 / trust@0x4000；而 GPT 会同时占用 LBA0(MBR) 与 LBA1(GPT 头)。
-      # 变体把 parameter 压到 446 B、MBR 分区表放 446..511、并抹掉 GPT 头/表。
-      # 这一步失败不应阻断主产物上传，所以不用 set -e。
-      - name: Build PARM-preserving variant
+          echo "=== 引导件与镜像 LBA64 区一致性 ==="
+          python3 - "$IMG" "$UBIN" <<'PY'
+          import sys
+          img, ubin = sys.argv[1], sys.argv[2]
+          a = open(img, "rb")
+          b = open(ubin, "rb").read()
+          a.seek(64 * 512)
+          d = a.read(len(b))
+          same = sum(x == y for x, y in zip(d, b))
+          print(f"  u-boot-rockchip.bin {len(b)} B，与镜像 LBA64 起逐字节相同 {same}/{len(b)}")
+          if d != b:
+              print("::error::镜像 LBA64 区与 deb 内 u-boot-rockchip.bin 不一致")
+              sys.exit(1)
+          PY
+
+      # ---------- 6. 引导布局报告（纯只读，供实刷对照） ----------
+      - name: Boot layout report
         run: |
-          set -uo pipefail
-          IMG=$(ls -1 build/output/images/*.img 2>/dev/null | head -1 || true)
-          if [ -z "$IMG" ]; then
-            echo "::warning::没有找到 .img，跳过 PARM 变体"
+          set -euo pipefail
+          UBIN=$(find build/ubootpkg -type f -name 'u-boot-rockchip.bin' | head -1 || true)
+          if [ -z "$UBIN" ]; then
+            echo "::warning::未找到 u-boot-rockchip.bin，跳过"
             exit 0
           fi
-          OUT="${IMG%.img}-parm.img"
-          echo "输入: $IMG"
-          echo "输出: $OUT"
-          if ! python3 custom/tools/mk-parm-variant.py "$IMG" "$OUT"; then
-            echo "::warning::mk-parm-variant.py 失败（主产物不受影响）"
-            exit 0
-          fi
-          echo "=== 变体校验 ==="
-          python3 - "$OUT" <<'PY'
-          import struct, sys, os
-          S = 512
-          f = open(sys.argv[1], "rb")
-          l0 = f.read(S)
-          print("  LBA0 magic    :", l0[:4])
-          size = struct.unpack_from("<I", l0, 4)[0]
-          print("  PARM 长度     :", size, "字节（必须 <= 446）")
-          for i in range(4):
-              e = l0[446+i*16:462+i*16]
-              if e == b"\x00"*16:
-                  continue
-              first, cnt = struct.unpack_from("<II", e, 8)
-              print(f"  MBR slot{i+1}    : type=0x{e[4]:02x} first={first} count={cnt} last={first+cnt-1}")
-          print("  MBR 签名      :", l0[510:512].hex())
-          f.seek(S)
-          print("  LBA1 (GPT 头) :", f.read(8))
-          print("  镜像大小      : %.1f MiB" % (os.path.getsize(sys.argv[1])/1048576))
+          python3 - "$UBIN" <<'PY'
+          import sys, struct
+          d = open(sys.argv[1], "rb").read()
+          print(f"  u-boot-rockchip.bin = {len(d)} B，头 4B (IDB) = {d[:4].hex(' ')}")
+          offs, i = [], 0
+          while True:
+              i = d.find(b"\xd0\x0d\xfe\xed", i)
+              if i < 0:
+                  break
+              offs.append(i)
+              i += 1
+          for o in offs:
+              tot = struct.unpack_from(">I", d, o + 4)[0]
+              print(f"  FIT magic @ 0x{o:x} -> 落盘 LBA {64 + o//512}, totalsize={tot} B")
+          print("  期望布局：IDB@LBA64、FIT@LBA16384、MBR p1@LBA32768（与官方 rockpi-4b 一致）")
           PY
 
       # ---------- 7. 收集产物 ----------
@@ -230,9 +240,11 @@ jobs:
           mkdir -p out
           find build/output/images -maxdepth 1 -type f -exec cp -a {} out/ \; || true
           find build/output/debs -maxdepth 2 -type f -name '*.deb' -exec cp -a {} out/ \; || true
-          # 引导件单独取出来：刷机要按 LBA 坐标分件写，不能整盘覆盖
-          for f in $(find build/ubootpkg -type f \( -name 'uboot.img' -o -name 'trust.bin' -o -name 'idbloader.bin' \) 2>/dev/null); do
-            cp -a "$f" "out/boot-$(basename "$f")"
+          # mainline：引导件是单一 u-boot-rockchip.bin（内含 IDB + FIT）。
+          # 实刷时按官方 write_uboot_platform 的 dd bs=32k seek=1 写入 LBA64，
+          # 不要按 vendor 坐标分件写（PARM / LOADER@8192 / BL3X@16384 已全部废弃）。
+          for f in $(find build/ubootpkg -type f -name 'u-boot-rockchip.bin' 2>/dev/null); do
+            cp -a "$f" out/boot-u-boot-rockchip.bin
           done
           # 确认本板 DTB 真的被注入并编译出来了
           for f in $(find build -path '*boot/dts/rockchip/rk3399-mid.dtb' 2>/dev/null | head -3); do
