@@ -1,13 +1,25 @@
 # RK3399-MID (Android 7 母板 / 云台一体机)
 #
-# 引导链设计要点（全部经官方 armbian/build 源码 + u-boot v2026.10 源码逐条核对）：
+# ★ 2026-11-15 修订（用户指令：mid 不与 WF7000A 保持一致；编译以 armbian 源码 + 官方规范为基线）★
+#   - DRAM 判伪：本板 = 4 GB LPDDR4（2ch×2048MB，416→856 MHz），由 DRAM 丝印 + TTL 训练日志双证钉死。
+#     原注「DDR3-1600 / dmc 800MHz」及一切基于 DDR3 的选型/参数/排除理由全部作废；
+#     原厂 DTB 的 ddr3_speed_bin=0x15 是 vendor BSP DMC 驱动的属性名，不是物理 DRAM 类型。
+#   - 撤销 11-12 未提交的「照抄 WF7000A 坐标（64/16384/24576 + 纯 MBR）」改动，
+#     回到本板实测布局；废弃版本留档于 docs/_废弃-照抄wf7000a坐标-csc-20261112.bak。
+#   - 补 LBA64 IDB：11-15 整盘恢复实证 BootROM 从 user 区 LBA64 读首级 IDB，
+#     LBA64 全零必然进 MaskROM（旧注释「idbloader 本板不落盘」已证伪）。
+#   - ophub 参照改选 r432 AIO-3399C（LPDDR4 + 8G eMMC + vendor LOADER 阵营，内核 6.18.63），
+#     见 docs/ophub-固件选型.md §十六；参照物只用于交叉验证，不进入构建链。
 #
-#  1. 本板 eMMC boot0 硬件分区里已有原厂 miniloader（DDR3-1600 / dmc 800MHz），
-#     它负责 DDR 初始化，并从 user 区固定偏移读取引导件：
+# 引导链设计要点（基线 = 官方 armbian/build rockchip64 family + u-boot v2026.10；坐标 = 本板实测）：
+#
+#  1. BootROM 从 eMMC user 区 LBA64 读 idbloader（rkbin DDR blob + miniloader）完成 DDR 初始化。
+#     ★ 必须落盘：LBA64 为空 => 板子直接停在 MaskROM（11-15 已实证恢复）。
+#     miniloader 之后按本板原厂 parameter(mtdparts) 固定坐标取件：
 #         LBA8192  -> "LOADER" 容器（vendor 格式 U-Boot）
 #         LBA16384 -> "BL3X"   容器（trust / ATF）
-#     原厂 parameter（mtdparts）里写死了这两个坐标：
 #         0x00002000@0x00002000(uboot)  0x00002000@0x00004000(trust)
+#     11-15 冷启后纯只读探针：6/6 引导锚点与修复后读回逐字节一致，坐标已坐实。
 #
 #  2. 因此本板走 rockchip64 家族的 only-blobs 场景：
 #       BOOT_SCENARIO=only-blobs
@@ -16,9 +28,9 @@
 #     官方默认写盘坐标是 64 / 16384 / 24576，与本板不符，
 #     故在下面用 post_family_config hook 覆盖 write_uboot_platform()。
 #
-#  3. idbloader.bin 本板不落盘：boot0 里已经有原厂 miniloader，
-#     user 区 LBA64 不被任何东西读取（BootROM 才会读 LBA64，而本板走 boot0 路径）。
-#     DDR 参数也由原厂 miniloader 决定，官方 DDR blob 对本板无效但仍需存在（仅构建期）。
+#  3. ★ idbloader.bin 必须写 LBA64（构建期产物；文件名兼容 .bin/.img，按 deb 实际内容探测）。
+#     DDR 由 rkbin blob 初始化，Armbian 侧不碰 sdram-params；
+#     `rk3399_ddr_800MHz_v1.30.bin` 的 800MHz 只是版本/频率档标签，内含 LPDDR4 训练表。
 #
 #  4. BOOT_SOC 必须显式指定为 rk3399：
 #     官方推导规则 expr "${BOOTCONFIG}" : '.*\(rk[[:digit:]]\+.*\)_.*'
@@ -137,20 +149,21 @@ IMAGE_PARTITION_TABLE="gpt"
 #
 # 官方 only-blobs 分支（config/sources/families/include/rockchip64_common.inc
 # 的 write_uboot_platform()）写的是：
-#     dd idbloader.bin seek=64      <- 本板不写（boot0 已有原厂 miniloader）
+#     dd idbloader.bin seek=64      <- 本板保留（★ 11-15 实证：LBA64 全零必进 MaskROM）
 #     dd uboot.img     seek=16384   <- 本板应为 8192
 #     dd trust.bin     seek=24576   <- 本板应为 16384
 #
-# 本板 boot0 miniloader 按原厂 mtdparts 固定读取：
+# 本板 miniloader 按原厂 mtdparts 固定读取：
 #     LOADER @ LBA8192   BL3X @ LBA16384
+# 首级 IDB（DDR blob + miniloader）由 BootROM 从 user 区 LBA64 读取。
 #
 # post_family_config hook 在 family 配置完成之后执行，此处定义的
 # write_uboot_platform() 会覆盖 family 里同名函数（后定义者胜）。
 # 官方同类写法见 config/boards/yy3568.csc（unset 后重新定义）。
 
 function post_family_config__rk3399mid_write_uboot_platform() {
-	display_alert "rk3399-mid" "Overriding write_uboot_platform() for this board's boot0 coordinate scheme" "info"
-	display_alert "rk3399-mid" "uboot.img -> LBA8192 (LOADER), trust.bin -> LBA16384 (BL3X), idbloader.bin NOT written" "info"
+	display_alert "rk3399-mid" "Overriding write_uboot_platform() for this board's measured boot coordinates" "info"
+	display_alert "rk3399-mid" "idbloader.bin -> LBA64, uboot.img -> LBA8192 (LOADER), trust.bin -> LBA16384 (BL3X)" "info"
 
 	unset write_uboot_platform write_uboot_platform_mtd
 
@@ -159,7 +172,22 @@ function post_family_config__rk3399mid_write_uboot_platform() {
 		local logging_prelude=""
 		[[ $(type -t run_host_command_logged) == function ]] && logging_prelude="run_host_command_logged"
 
-		# 本板 boot0 miniloader 已存在，user 区 LBA64 的 idbloader 不被读取，跳过。
+		# ★ 坑①修复：首级 IDB 必须落 LBA64。armbian deb 里文件名为 idbloader.bin，
+		#   早期版本曾误用 idbloader.img 导致 dd 读空 => 镜像 LBA64 全零 => 刷完必进 MaskROM。
+		#   这里按实际文件名探测，找不到就报错，绝不静默跳过。
+		local idb_src=""
+		local _cand
+		for _cand in idbloader.bin idbloader.img; do
+			if [[ -s "$1/${_cand}" ]]; then
+				idb_src="$1/${_cand}"
+				break
+			fi
+		done
+		if [[ -z "${idb_src}" ]]; then
+			exit_with_error "rk3399-mid: idbloader blob not found in $1 (BootROM needs it at LBA64)"
+		fi
+		${logging_prelude} dd if="${idb_src}" of=$2 bs=512 seek=64    conv=notrunc status=none
+
 		${logging_prelude} dd if=$1/uboot.img of=$2 bs=512 seek=8192  conv=notrunc status=none
 		${logging_prelude} dd if=$1/trust.bin of=$2 bs=512 seek=16384 conv=notrunc status=none
 	}

@@ -6,7 +6,10 @@ RK3399 MID 板（Rockchip Sapphire + Excavator 参考设计的定制会议平板
 
 ## 硬件一句话
 
-RK3399 / 4GB DDR3-1600 / 8GB eMMC（DG4008）/ eDP 1920×1080 / GT9xx 触摸 / ES8316 + 2×ES7243 + 3×SN3732A / HR8833 云台 / AP6255 WiFi+BT / 千兆 RGMII / 2S 8.4V 电池 / 双 ISP / 无 SD 卡槽 / UART2 调试口。
+RK3399 / **4 GB LPDDR4（2ch×2048MB，416→856 MHz）** / 8GB eMMC（DG4008）/ eDP 1920×1080 / GT9xx 触摸 / ES8316 + 2×ES7243 + 3×SN3732A / HR8833 云台 / AP6255 WiFi+BT / 千兆 RGMII / 2S 8.4V 电池 / 双 ISP / 无 SD 卡槽 / UART2 调试口。
+
+> ⛔ **2026-11-15 判伪**：本文件原写「4GB DDR3-1600 / dmc 800 MHz」，**已作废**。用户核对 DRAM 丝印 + TTL 训练日志双证钉死为 **LPDDR4**。原厂 DTB 的 `ddr3_speed_bin=0x15` 只是 vendor BSP DMC 驱动的**属性名**，不是物理 DRAM 类型。任何基于「本板 DDR3」的选型/参数/排除理由一律不再引用。详见 `docs/ophub-固件选型.md` 文件头判伪声明与 §十六。
+> 另：本仓 `uboot/` + `dist/` 是 **11-10 的早期 mainline/SPI 实验线**（115200 串口、`u-boot.itb`），**不是当前主线**；当前编译主线为 `.github/workflows/build-armbian.yml` + `armbian/userpatches/`，以 `armbian/build` 官方源码为基线。
 
 详见 `rk3399-mid-backup/armbian/硬件清单-详尽版.md`。
 
@@ -23,8 +26,7 @@ uboot/
 ## 关键设计
 
 1. **DDR 初始化不用手写参数**：`CONFIG_ROCKCHIP_EXTERNAL_TPL=y` + Rockchip 官方
-   `rk3399_ddr_800MHz_v1.30.bin`（本板 DDR3-1600 = 800MHz，实测 dmc 频率 800000000 Hz）。
-   这是本轮移植最关键的取舍——避开手写 `rockchip,sdram-params` 的风险。
+   `rk3399_ddr_800MHz_v1.30.bin`。⛔ 原注「本板 DDR3-1600 = 800 MHz」**作废**：`800MHz` 只是 rkbin 的**版本/频率档标签**，该 bin 内含 LPDDR3/LPDDR4/DDR3 多套训练表、运行时自动选路；TTL 已实证它在本板 **LPDDR4** 上 `training pass`。避开手写 `rockchip,sdram-params` 的取舍本身仍然成立。
 
 2. **串口降速到 115200**：vendor 固件用 1500000，但移植阶段 115200 兼容所有 USB-TTL。
    产物烧录后若串口无输出，可用 workflow 的 `baudrate` 参数改回 1500000 重编。

@@ -1,4 +1,13 @@
-# ophub 固件选型：rk3399-mid（视频会议一体机）
+# ⛔【整份判伪 · 2026-11-15】ophub 固件选型：rk3399-mid（视频会议一体机）
+
+> ## ⛔ 判伪声明（2026-11-15 21:2x，用户核对 DRAM 丝印后确认）
+> **本文的核心选型结论「选 TN3399，因为本板是 4 GB DDR3」已整体作废，不得再作为编译或刷机依据。**
+> - 本板 DRAM = **4 GB LPDDR4（2ch × 2048 MB，416→856 MHz）**：① 用户现场核对 DRAM 丝印确认为 LPDDR4；② TTL 训练日志 `Channel 0/1: LPDDR4 … Size=2048MB / training pass / 856MHz`（`rescue/direct-boot/serial-captures/boot-20261114-1243-poweron.txt:24-27`、`boot-20261114-1727-readonly.txt:52-55,240-243`）。双证钉死。
+> - 原厂 DTB 的 `ddr3_speed_bin=0x15` / `dmc cur_freq=800MHz` 是 **vendor BSP DMC 驱动的属性名**，RK3399 BSP 对 LPDDR3/LPDDR4 同样沿用 `ddr3_*` 命名的 `sdram-params`；属性名 ≠ 物理 DRAM 类型，且 800 MHz 与实测 416→856 MHz 不符。
+> - ophub `model_database.conf` 的 `r403 TN3399 = 4GB-DDR3` 描述的是 **TN3399 这块板**，不是本板；当初「逐项吻合」是类比推断。
+> - **§一 结论、§三 硬件对照表的「内存」行与「TN3399 胜出的决定性理由」、§八「不要选 rockpi4b 因为 LPDDR4」全部作废**；§七 里以 DDR3 为卖点的备选板型理由同步作废。
+> - 本文 §二 / §十 / §十一～§十五 的**实测布局、坐标、PARM/GPT 冲突、IDB 与 Loader +8192 偏移**等事实与 DDR 类型无关，**继续有效**，保留作证据链。
+> - **新的选型结论见本文 §十六**（2026-11-15 重选：LPDDR4 + vendor `uboot.img` LOADER 阵营），权威基线为 armbian 源码与官方 board 规范。
 
 > 生成时间：2026-11-11 12:2x
 > 数据源：`ophub/amlogic-s9xxx-armbian` Release `Armbian_trixie_arm64_server_2026.11`、`model_database.conf`（`r401`–`r441`）、`ophub/u-boot`、`build-armbian/.../bootfs/dtb/rockchip/` 下 50 份 rk3399 DTB 逐份解析；本板基准来自 `armbian/硬件清单-详尽版.md` 与 `docs/vendor-dtb-facts.md`。
@@ -322,3 +331,56 @@
 ### 15.6 下一步
 
 断电（拔电池）冷启动验证 Android 是否起来。**注意：本次重刷只重写 user 区，未改 eMMC boot0 硬件分区 / `PARTITION_CONFIG`** ⇒ 若 §十四 的推论成立，仍会停在 rockusb；届时转「写 boot0」路线。
+
+---
+
+## 十六、★ 2026-11-15 重选 ophub 参照（DDR 判伪后的权威替换）
+
+> 用户指令：**mid 不与 WF7000A 保持一致；编译以 armbian 源码 + 官方 board 规范为基线；重新选 ophub 更相近的固件做参照。**
+> 数据源（本轮实拉，非二手推断）：`https://raw.githubusercontent.com/ophub/amlogic-s9xxx-armbian/main/build-armbian/armbian-files/common-files/etc/model_database.conf`（479 行，RK3399 Family 在 347–407 行）+ Release `Armbian_trixie_arm64_server_2026.11` 的 461 个 asset。
+
+### 16.1 筛选判据（优先级从高到低）
+
+1. **DRAM = LPDDR4**（本板已钉死）；
+2. **引导阵营 = vendor `uboot.img`(LOADER) + `idbloader.bin` + `trust.bin`**，而非 `u-boot.itb`/`idbloader.img` 的 mainline FIT 阵营（后者正是 WF7000A/rockpi4b 走的路线，用户已明确不与之对齐）；
+3. eMMC 容量 / 4 GB 内存 / 1 GbE 尽量贴近；
+4. `BOOT_CONF` 尽量与 armbian 官方 `armbianEnv.txt` 一致，便于对齐官方规范。
+
+### 16.2 RK3399 家族里明确标 LPDDR4 的板型（原文摘录）
+
+| ID | 板型 | model_database 描述 | 引导阵营 | 判定 |
+|---|---|---|---|---|
+| **r432** | **AIO-3399C** | `2GB/4GB-LPDDR4,8G/128G-eMMC,SD,1Gb-Nic` | `trust.bin` + `uboot.img` + `idbloader.bin` | ✅ **主选**：LPDDR4 + **8G eMMC 与本板一致** + vendor LOADER 阵营 |
+| r433 | AIO-3399C(AI) | `2GB/4GB-LPDDR4,8G/128G-eMMC,SD,1Gb-Nic` | 同 r432 | 备选（r432 的 AI 变体） |
+| **r441** | **AI3399-C** | `4GB-LPDDR4,32G-eMMC,TF,1Gb-Nic` | `trust.bin` + `uboot.img` + `idbloader.bin`，`armbianEnv.txt` | ✅ **次选**：4 GB LPDDR4 明写 + BOOT_CONF 与官方一致 |
+| r430 | NanoPC-T4 | `4GB-RAM,64G-eMMC,1Gb-Nic`（硬件实为 LPDDR4，库里未明写） | 同 vendor 阵营 | 备选（类型靠外部资料，不如 r432/r441 硬） |
+| r413 | Leez-P710 | `4GB-LPDDR4,16G-eMMC,1Gb-Nic` | **`u-boot.itb` + `idbloader.img`** | ❌ mainline 阵营，与 WF7000A 同路，排除 |
+| ~~r403~~ | ~~TN3399~~ | ~~`4GB-DDR3,16G-eMMC,…`~~ | vendor 阵营 | ⛔ **旧参照作废**（DDR3 板，选型理由不成立） |
+
+### 16.3 主选参照的可下载镜像（已取到 digest）
+
+| 项 | 值 |
+|---|---|
+| 文件 | `Armbian_26.11.0_rockchip_aio-3399c_trixie_6.18.63_server_2026.11.14.img.gz` |
+| 大小 / sha256 | 863,302,087 B / `64d42550bb20d6640342603de9e6d9b20b0dac587b15a8244799b00e092a61df` |
+| 内核 | 6.18.63 —— **与本项目 CI 产出的 `6.18.63` 完全一致**，便于逐段对照 |
+| 通道 | `https://gh-proxy.com/https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_trixie_arm64_server_2026.11/<文件名>` |
+
+次选：`Armbian_26.11.0_rockchip_ai3399-c_trixie_6.18.63_server_2026.11.14.img.gz`，862,583,756 B，sha256 `ed9b2292cb16eb335f966772b6862ffc89fc3018a3f1e027c795981f42e996d7`。
+
+### 16.4 参照物用在哪、不用在哪
+
+- **用**：对照 `idbloader.bin` / `uboot.img` / `trust.bin` 三件的**格式与落盘坐标**、LBA0 分区表形态、`armbianEnv.txt` / `extlinux.conf` 的 bootargs 结构、DTB 集合里 eDP/背光/GMAC 的写法，作为「armbian 官方规范产出的板级镜像」的实物参照。
+- **不用**：**不整盘刷、不照抄其 DTB、不把它的坐标当成 mid 的坐标**。本板实测坐标仍是 §十 / §十三～§十五 的 `LBA0 PARM + LBA8192 LOADER + LBA16384 BL3X`，rootfs 起点 LBA32768；这与 ophub 的 `LBA0 GPT + LBA64 idbloader + LBA16384 LOADER + LBA24576 BL3X` 不同，必须重排。
+- **编译基线不变**：`armbian/build` 官方源码 + `userpatches/config/boards/rk3399-mid.csc`（`BOARDFAMILY=rockchip64` / `BOOT_SCENARIO=only-blobs` / `BOOTCONFIG=evb-rk3399_defconfig`），ophub 镜像只作**参照与交叉验证**，不进入构建链。
+
+### 16.5 连带作废清单（与 DDR3 相关的旧结论）
+
+| 旧结论 | 处置 |
+|---|---|
+| 「本板 4 GB DDR3-1600 / dmc 800 MHz」 | ⛔ 作废，改 **4 GB LPDDR4 416→856 MHz** |
+| 「U-Boot 必须用 `rk3399-sdram-ddr3-800.dtsi` 的 DDR3-800 参数」 | ⛔ 整条作废，本板 DDR 由 rkbin DDR blob 初始化，Armbian 侧不碰 `sdram-params` |
+| 「选 TN3399 因同为 DDR3」 | ⛔ 作废，改 §16.2 的 LPDDR4 判据 |
+| 「WF7000A 的 LPDDR4 idbloader 在 DDR3 板上假死 ⇒ 不通用」 | ⛔ **排除理由作废**（本板正是 LPDDR4）；但「不与 WF7000A 对齐」由用户指令确立，属路线选择而非硬件不兼容 |
+| 「`rk3399_ddr_800MHz_v1.30.bin` 是 DDR3-800 专用」 | ⛔ 作废，`800MHz` 只是 rkbin 版本/频率档标签，内含多套训练表，TTL 实证在 LPDDR4 上 training pass |
+
