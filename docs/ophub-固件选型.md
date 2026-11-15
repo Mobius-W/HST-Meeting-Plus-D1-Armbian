@@ -8,6 +8,7 @@
 > - **§一 结论、§三 硬件对照表的「内存」行与「TN3399 胜出的决定性理由」、§八「不要选 rockpi4b 因为 LPDDR4」全部作废**；§七 里以 DDR3 为卖点的备选板型理由同步作废。
 > - 本文 §二 / §十 / §十一～§十五 的**实测布局、坐标、PARM/GPT 冲突、IDB 与 Loader +8192 偏移**等事实与 DDR 类型无关，**继续有效**，保留作证据链。
 > - **新的选型结论见本文 §十六**（2026-11-15 重选：LPDDR4 + vendor `uboot.img` LOADER 阵营），权威基线为 armbian 源码与官方 board 规范。
+> - ⚠️ **阅读规则**：§一～§九 的 DDR3 结论为**历史原文保留、未逐行改写**，一律不作准（§三 对照表「内存」行、§三「TN3399 胜出的决定性理由」、§七 DDR3 备选理由、§八 排除 rockpi4b 的 LPDDR4 理由尤其如此）。完整作废清单见 §16.5。
 
 > 生成时间：2026-11-11 12:2x
 > 数据源：`ophub/amlogic-s9xxx-armbian` Release `Armbian_trixie_arm64_server_2026.11`、`model_database.conf`（`r401`–`r441`）、`ophub/u-boot`、`build-armbian/.../bootfs/dtb/rockchip/` 下 50 份 rk3399 DTB 逐份解析；本板基准来自 `armbian/硬件清单-详尽版.md` 与 `docs/vendor-dtb-facts.md`。
@@ -116,9 +117,10 @@
 
 | 文件 | 说明 |
 |---|---|
-| `rk3399-mid-backup/tools/ci/download-ophub-firmware.sh` | 一键下载 + sha256 校验，支持 8 个板型 |
-| `rk3399-mid-backup/test/ophub-uboot/tn3399-uboot.img` | 已下载的 U-Boot 2020.10（LOADER 格式） |
-| `rk3399-mid-backup/test/native-uboot-bundle/` | 本机适配引导区包（PARM + 原厂 trust + ophub U-Boot + 本板 DTB） |
+| `rk3399-mid-backup/tools/ci/download-ophub-firmware.sh` | 一键下载 + sha256 校验；**2026-11-15 改写为只下载 LPDDR4 参照板型**，默认 `aio-3399c` / 6.18.63 |
+| `rk3399-mid-backup/test/ophub-firmware/Armbian_26.11.0_rockchip_aio-3399c_trixie_6.18.63_server_2026.11.14.img.gz` | **新参照固件**（§16.3），下载中 |
+| ⛔ `test/ophub-uboot/tn3399-uboot.img`、`test/ophub-firmware/tn3399*`、`test/native-*-16M.img` 等 13 个文件 | **2026-11-15 已判伪清理**，移入 `/Volumes/HDD/.Trashes/502/rk3399-mid-DDR3判伪清理-20261115/`（可完整恢复）。下方 §十一～§十五 提到这些路径处按「历史记录」读，不再是可用的现成件 |
+| `test/native-uboot-bundle/trust.img` | **保留**（sha `99bcacc6…` == 本板 `stock/trust.img`，原厂 4 段 `f8000400`），非 DDR3 产物 |
 | `rk3399-mid-linux/linux/rk3399-mid.dtb` | 本板 mainline DTB（eDP 138.5 MHz / PWM0 / GPIO1_B5） |
 | `rk3399-mid-linux/tools/fdt.py` | 纯 Python FDT 解析器（本机无 dtc） |
 | `/tmp/ophub-dtb/` | 50 份 ophub rk3399 DTB 副本，供后续比对 |
