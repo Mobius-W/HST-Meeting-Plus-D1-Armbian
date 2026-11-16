@@ -221,6 +221,21 @@
 	i2c-scl-falling-time-ns = <15>;
 	status = "okay";
 
+	/*
+	 * ⚠️ 2026-11-16 实测结论：ES8316 在 0x11 **硬件层无 ACK**（非 DTS 问题）。
+	 *   证据链：
+	 *   1) 同总线 ff110000(i2c1) 上 ES7243 的 0x10 / 0x12 均正常应答
+	 *      ⇒ 总线、pinmux（gpio4-1/2）、上拉都正常；
+	 *   2) 先把 es8316 驱动 unbind（i2cdetect 对已占用地址只显示 UU、不探测），
+	 *      再做真实探测：i2cdetect -y 1 的 0x11 仍为 `--`，
+	 *      i2ctransfer w1/w2 @0x11 全部 "No such device or address"；
+	 *   3) 供电：vcca3v0_codec(LDO5) / vcca1v8_codec(LDO7) 均 enabled 且电压正常；
+	 *   4) 拉高/拉低 vendor 记录的两条控制脚（spk-con=gpio4 PD1、
+	 *      amp-en=gpio4 PA5、hp_con=gpio4 PD6）后重测，0x11 仍无 ACK。
+	 *   ⇒ 芯片未上电 / CE 悬空 / 器件损坏，需硬件排查（量 VDDA、VDD、CE）。
+	 *   sound card 仍能注册（ASoC 不依赖 codec 应答），但所有寄存器访问返回 -6，
+	 *   播放必然无声。
+	 */
 	es8316: es8316@11 {
 		compatible = "everest,es8316";
 		reg = <0x11>;
@@ -288,19 +303,36 @@
 	i2c-scl-falling-time-ns = <20>;
 	status = "okay";
 
-	touchscreen@5d {
-		compatible = "goodix,gt911";
-		reg = <0x5d>;
+	touchscreen@14 {
+		/*
+		 * 2026-11-16 实测修正：屏下的触摸芯片是 **GT9271**（驱动回读 ID=9271），
+		 * 且 GT9xx 的 I2C 从地址由**复位释放瞬间 INT 脚电平**决定：
+		 *   INT 低 → 0x5D，INT 高 → 0x14。
+		 * 本板 INT 脚（GPIO2_A7）为默认上拉 ⇒ 芯片落在 **0x14**。
+		 * 旧写 reg = <0x5d>（照抄 vendor）时驱动一直读 0x5d 收不到 ACK：
+		 *   dmesg: "Error reading 1 bytes from 0x8140: -6" /
+		 *          "I2C communication failure: -6"
+		 * 实测 i2cdetect -y 2 只有 0x14 应答，0x5d 无。
+		 *
+		 * goodix 驱动对 0x14 有专门处理（goodix.c：
+		 *   goodix_irq_direction_output(ts, ts->client->addr == 0x14)），
+		 * 复位时会把 INT 拉高来锁定 0x14；但这要求 **irq-gpios 存在**
+		 * （否则 irq_pin_access_method = NONE，复位流程直接失败）。
+		 * 所以 irq-gpios 与 interrupts 必须同时给：前者供驱动复位选地址，
+		 * 后者供 Linux 申请中断。
+		 */
+		compatible = "goodix,gt9271";
+		reg = <0x14>;
 		interrupt-parent = <&gpio2>;
 		interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
+		irq-gpios = <&gpio2 RK_PA7 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&gpio4 RK_PC6 GPIO_ACTIVE_HIGH>;
 		/*
 		 * 2026-11-16 修正：原来 pinctrl-0 = <&touch_int &lcd_panel_reset>，
 		 * 而 lcd_panel_reset 是 gpio3 RK_PA4，该脚已被 fe300000.ethernet(GMAC) 申请，
 		 * 导致 pinctrl 报 "pin gpio3-4 already requested by fe300000.ethernet"
 		 * → probe -EINVAL，触摸完全没有 driver。
-		 * vendor DTB 中触摸只用了中断脚，没有额外 reset pinctrl，故只保留 touch_int。
-		 * 同时删除与 interrupts 重复的 irq-gpios（同一 GPIO 两种声明会冲突）。
+		 * vendor DTB 中触摸只用了中断脚，故只保留 touch_int。
 		 */
 		pinctrl-names = "default";
 		pinctrl-0 = <&touch_int>;
@@ -369,6 +401,37 @@
 		touch_int: touch-int {
 			rockchip,pins = <2 RK_PA7 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
+	};
+};
+
+/* ---------------- UART0：AP6255 蓝牙（BCM4345C0） ---------------- */
+/*
+ * 2026-11-16 新增。AP6255 = WiFi(SDIO) + BT(UART) 二合一模块。
+ * vendor 侧参数（rk3399-mid-stock.dts wireless-bluetooth 节点）：
+ *   BT,reset_gpio   = <&gpio0 9 0>   → GPIO0_B1  BT_REG_ON（高=上电）
+ *   BT,wake_gpio    = <&gpio2 26 0>  → GPIO2_D2  host→device 唤醒
+ *   BT,wake_host_irq= <&gpio0 4 0>   → GPIO0_A4  device→host 唤醒
+ *   uart_rts_gpios  = <&gpio2 19 1>  → GPIO2_C3  (= uart0 RTS 复用脚)
+ *
+ * ⚠️ RTS 必须一起复用（uart0_rts），这是关键：
+ *   sapphire.dtsi 默认只复用 uart0_xfer + uart0_cts，RTS 脚留在 GPIO 态。
+ *   实测该状态下 hci0 能建出来，但 "command 0x0c03 tx timeout /
+ *   BCM: Reset failed (-110)" —— 因为模块侧 CTS 悬空，模块不放行发送。
+ *   补上 &uart0_rts 后一次通过：芯片 ID 107、features 0x2f、
+ *   HCD 补丁下载成功、波特率升到 37.4 MHz。
+ */
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_xfer &uart0_cts &uart0_rts>;
+	status = "okay";
+
+	bluetooth {
+		compatible = "brcm,bcm43438-bt";
+		clocks = <&rk808 1>;
+		clock-names = "ext_clock";
+		shutdown-gpios = <&gpio0 RK_PB1 GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&gpio2 RK_PD2 GPIO_ACTIVE_HIGH>;
+		host-wakeup-gpios = <&gpio0 RK_PA4 GPIO_ACTIVE_HIGH>;
 	};
 };
 
