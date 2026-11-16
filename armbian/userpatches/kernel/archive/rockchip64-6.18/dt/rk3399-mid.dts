@@ -198,6 +198,31 @@
 		pinctrl-0 = <&wifi_enable_h>;
 		reset-gpios = <&gpio0 RK_PB2 GPIO_ACTIVE_LOW>;
 	};
+
+	/*
+	 * 云台单轴电机 —— HR8833 双 H 桥（mainline 无此驱动，需自写）
+	 *
+	 * 引脚完全取自 vendor /motor 节点：
+	 *   AIN1    GPIO2_A2  高 = 正转
+	 *   AIN2    GPIO2_A3  高 = 反转
+	 *   nSLEEP  GPIO2_A4  ACTIVE_LOW（vendor flag=0x01），逻辑 1 = 休眠
+	 *   OCP-DET GPIO2_A5  ACTIVE_LOW（vendor flag=0x08），逻辑 1 = 过流
+	 *
+	 * 注意 vendor 用的是单数属性名 ain1-gpio，这里按 mainline 规范写复数
+	 * ain1-gpios（gpiod_get 两者都认，复数更标准）。
+	 * 驱动源码：kernel-modules/hr8833/hr8833.c（经 0001-misc-add-hr8833.patch
+	 * 编入内核），用户态接口 /dev/hr8833 + /sys/class/misc/hr8833/device/。
+	 */
+	motor: motor {
+		compatible = "heroic,hr8833";
+		ain1-gpios = <&gpio2 RK_PA2 GPIO_ACTIVE_HIGH>;
+		ain2-gpios = <&gpio2 RK_PA3 GPIO_ACTIVE_HIGH>;
+		sleep-gpios = <&gpio2 RK_PA4 GPIO_ACTIVE_LOW>;
+		ocp-det-gpios = <&gpio2 RK_PA5 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&motor_pins>;
+		status = "okay";
+	};
 };
 
 /* ---------------- eDP ---------------- */
@@ -408,6 +433,17 @@
 	touch {
 		touch_int: touch-int {
 			rockchip,pins = <2 RK_PA7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	/* 云台 4 根线：AIN1/AIN2/nSLEEP 输出，OCP-DET 输入带上拉 */
+	motor {
+		motor_pins: motor-pins {
+			rockchip,pins =
+				<2 RK_PA2 RK_FUNC_GPIO &pcfg_pull_none>,
+				<2 RK_PA3 RK_FUNC_GPIO &pcfg_pull_none>,
+				<2 RK_PA4 RK_FUNC_GPIO &pcfg_pull_none>,
+				<2 RK_PA5 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
 };

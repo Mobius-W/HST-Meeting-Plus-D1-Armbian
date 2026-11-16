@@ -1,0 +1,77 @@
+name: Build out-of-tree modules (RK3399-MID)
+
+# 只编译 kernel-modules/ 下的树外驱动，不碰内核镜像，跑一次约 2 分钟。
+#
+# 为什么要单独一条流水线：
+#   设备上运行的 6.18.63-current-rockchip64 内核不会因为加驱动而重编，
+#   树外模块对同一份 linux-headers 编译 ⇒ vermagic 与在跑内核完全一致，
+#   产物可以直接 scp 到设备 `insmod` 验证，不用重刷整机。
+#
+# 依赖：prebuilt/ 下的 linux-headers deb（与本机内核同一次构建的产物）。
+#   若以后升级内核，把新的 headers deb 换进 prebuilt/ 即可。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "kernel-modules/**"
+      - "prebuilt/linux-headers-*.deb"
+      - ".github/workflows/build-modules.yml"
+
+concurrency:
+  group: modules-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Cross-compile modules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu make bc bison flex libssl-dev libelf-dev
+
+      - name: Unpack kernel headers
+        run: |
+          set -eux
+          mkdir -p /tmp/hdr
+          cd /tmp/hdr
+          # deb 是 ar 归档：data.tar.xz 里就是 /usr/src/linux-headers-<ver>
+          ar x "$GITHUB_WORKSPACE"/prebuilt/linux-headers-*.deb
+          tar -xf data.tar.xz
+          HDR=$(echo /tmp/hdr/usr/src/linux-headers-*)
+          test -f "$HDR/Module.symvers"
+          echo "HDR=$HDR" >> "$GITHUB_ENV"
+          cat "$HDR/include/config/kernel.release"
+
+      - name: Build modules
+        run: |
+          set -eux
+          for m in kernel-modules/*/; do
+            [ -f "$m/Makefile" ] || continue
+            echo "==> building $m"
+            make -C "$HDR" M="$PWD/${m%/}" \
+                 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+          done
+
+      - name: Inspect result
+        run: |
+          set -eux
+          find kernel-modules -name '*.ko' -exec ls -l {} \;
+          for ko in $(find kernel-modules -name '*.ko'); do
+            echo "--- $ko"
+            modinfo "$ko" | grep -E '^(filename|license|description|vermagic|parm):' || true
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ko-rk3399-mid-${{ github.run_number }}
+          path: kernel-modules/**/*.ko
+          if-no-files-found: error
+          retention-days: 30
