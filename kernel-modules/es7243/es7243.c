@@ -373,6 +373,7 @@ static int mid_audio_probe(struct platform_device *pdev)
 	/* 两颗 ADC 通过 everest,adc = <&es7243_0>, <&es7243_1> 指过来；
 	 * 我们自己从节点里取 i2c adapter + 地址，不依赖 i2c client 绑定。 */
 	for (i = 0; i < MID_ADC_MAX; i++) {
+		struct device_node *i2c_np;
 		u32 addr;
 
 		np = of_parse_phandle(dev->of_node, "everest,adc", i);
@@ -385,12 +386,17 @@ static int mid_audio_probe(struct platform_device *pdev)
 			return -EINVAL;
 		}
 
-		priv->adc[i].adap = of_get_i2c_adapter_by_node(np);
+		/* of_get_i2c_adapter_by_node() 要的是 i2c 控制器节点，
+		 * 不是从设备节点 ⇒ 取父节点。 */
+		i2c_np = of_get_parent(np);
+		priv->adc[i].adap = of_get_i2c_adapter_by_node(i2c_np);
 		priv->adc[i].addr = addr;
+		of_node_put(i2c_np);
 		of_node_put(np);
 
 		if (!priv->adc[i].adap) {
-			dev_err(dev, "adc[%d]: i2c adapter not found\n", i);
+			dev_err(dev, "adc[%d]@0x%02x: i2c adapter not found\n",
+				i, addr);
 			return -EPROBE_DEFER;
 		}
 		dev_info(dev, "adc[%d]: i2c-%d addr 0x%02x\n", i,
