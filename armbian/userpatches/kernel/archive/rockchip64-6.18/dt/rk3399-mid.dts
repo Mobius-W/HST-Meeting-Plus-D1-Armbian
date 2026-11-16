@@ -238,6 +238,14 @@
 	 * connector 找不到面板 ⇒ 无 mode ⇒ 黑屏。
 	 */
 	ports {
+		port@0 {
+			/*
+			 * ★ 删掉 edp_in_vopb，eDP 只保留 VOPL。
+			 * 原因见 &vopl_out 上方的长注释（CRTC 绑定锁死）。
+			 */
+			/delete-node/ endpoint@0;
+		};
+
 		port@1 {
 			reg = <1>;
 
@@ -246,6 +254,36 @@
 			};
 		};
 	};
+};
+
+/*
+ * ★ CRTC 绑定锁死：eDP → VOPL，HDMI → VOPB
+ *
+ * 基础 dtsi 里 eDP 和 HDMI 各自都有两条输入端点，同时连着 VOPB 和 VOPL，
+ * 于是 drm_of_find_possible_crtcs() 会把两个 VOP 都算进两者的 possible_crtcs。
+ * 运行中热插拔 HDMI 时 rockchip-drm 会做全量 atomic modeset 并重新挑 CRTC，
+ * 一旦抢到 eDP 正在用的那个 ⇒ commit 失败 ⇒ 两块屏一起黑，极端情况整机挂死
+ * （本板 2026-11-16 实测踩到：拔 HDMI 后 eDP 也黑，且 SSH 完全失联）。
+ *
+ * 把多余的连线删掉后，每个显示器的 possible_crtcs 只剩一个 VOP：
+ *   eDP  → VOPL（内屏 1080p60，像素时钟 148.5MHz，VOPL 带得动，且只需 1 个窗口）
+ *   HDMI → VOPB（4K 只有大 VOP 扛得住）
+ * 两者不可能抢同一个 CRTC，热插拔不会再波及对方。
+ *
+ * 注意：删 endpoint 时必须成对删（输入端 + VOP 输出端），否则 dtc 会报
+ * "Reference to non-existent node"（phandle 指向已删除节点）。
+ */
+
+/* eDP 占用 vopl_out 的 endpoint@1（vopl_out_edp），保留 */
+&vopl_out {
+	/* hdmi_in_vopl 已被删，对应的 vopl_out_hdmi 必须同步删掉 */
+	/delete-node/ endpoint@2;
+};
+
+/* HDMI 占专用 vopb_out 的 endpoint@2（vopb_out_hdmi），保留 */
+&vopb_out {
+	/* edp_in_vopb 已被删，对应的 vopb_out_edp 必须同步删掉 */
+	/delete-node/ endpoint@0;
 };
 
 /* ---------------- I2C1：ES8316 音频 + ES7243 麦阵 ---------------- */
@@ -547,6 +585,16 @@
  */
 &hdmi {
 	status = "okay";
+
+	ports {
+		port@0 {
+			/*
+			 * ★ 删掉 hdmi_in_vopl，HDMI 只保留 VOPB（4K 需要大 VOP）。
+			 * 原因见 &vopl_out 上方的长注释（CRTC 绑定锁死）。
+			 */
+			/delete-node/ endpoint@1;
+		};
+	};
 };
 
 &hdmi_sound {
