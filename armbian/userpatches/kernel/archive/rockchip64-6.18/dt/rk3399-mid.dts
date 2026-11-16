@@ -124,9 +124,10 @@
 	 *
 	 * ✅ 现代正确写法：panel-edp 的 generic "edp-panel" 只支持挂在 DP AUX 总线上
 	 *    （panel-edp.c: "Skip one since \"edp-panel\" is only supported on DP AUX bus"）。
-	 *    因此面板节点必须移到 &edp 的 aux-bus 里，由 aux 总线枚举，
-	 *    时序由 eDP AUX 读 EDID 得到（eDP 规范强制要求 EDID）。
-	 *    vendor 的固定时序（138.5MHz / 1920x1080）由 EDID 覆盖，无需手写。
+	 *    因此面板节点必须移到 &edp 的 aux-bus 里，由 aux 总线枚举。
+	 * ⚠️ 但"eDP 规范强制要求 EDID"这一条在本板不成立：实测 AUX 读 EDID 失败
+	 *    （i2cdetect 在 DP-AUX 适配器上全空，i2cget 0x50 报 Read failed），
+	 *    必须改用带固定时序的面板条目，详见下面 aux-bus 内的说明。
 	 */
 	/*
 	 * 音频路由 —— 2026-11-16 按 es8316.c 实际 DAPM 表重写。
@@ -191,8 +192,22 @@
 	 * 抢占会导致 pinctrl -EINVAL，已彻底删除。
 	 */
 	aux-bus {
+		/*
+		 * ⛔ 不能用 generic "edp-panel"：它走 generic_edp_panel_probe()，
+		 *    必须从 AUX 读到 EDID 才能确定时序。本板实测读不到 EDID
+		 *    （dmesg: "Couldn't read EDID for ID; using conservative timings"），
+		 *    结果 desc->num_timings/num_modes 全为 0 ⇒ connector 一个 mode 都没有，
+		 *    /sys/class/drm/card0-eDP-1/modes 为空，屏永远点不亮。
+		 *
+		 * ✅ 改用与 vendor 时序完全吻合的固定面板条目 neweast,wjfh116008a：
+		 *    clock 138500 kHz、1920x1080、NHSYNC|NVSYNC、bpc 6、260x150mm。
+		 *    htotal = 1920+48+32+80 = 2080，vtotal = 1080+3+5+23 = 1111，
+		 *    与 vendor display-timings 解出的总时序完全一致（138.5MHz@60Hz）。
+		 *    该条目的 num_modes=2 ⇒ 走 panel_edp_get_display_modes()，
+		 *    不依赖 EDID 即可注册 1920x1080@60 模式。
+		 */
 		panel: panel {
-			compatible = "edp-panel";
+			compatible = "neweast,wjfh116008a";
 			backlight = <&backlight>;
 			power-supply = <&vcc3v3_s0>;
 			status = "okay";
