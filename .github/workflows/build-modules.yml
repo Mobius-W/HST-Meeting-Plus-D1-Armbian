@@ -71,26 +71,30 @@ jobs:
           #     modules_prepare → archprepare 会 "No rule to make target"。
           #     这是纯 awk 脚本，从上游同版本取回即可。
           set -u
-          AWK="$HDR/arch/arm64/tools/gen-cpucaps.awk"
-          if [ ! -f "$AWK" ]; then
-            mkdir -p "$(dirname "$AWK")"
-            curl -fsSL -o "$AWK" \
-              https://raw.githubusercontent.com/torvalds/linux/v6.18/arch/arm64/tools/gen-cpucaps.awk \
-              || rm -f "$AWK"
-          fi
-          echo "gen-cpucaps.awk: $([ -f "$AWK" ] && echo present || echo missing)"
+          # deb 把 arch/arm64/tools/ 整个目录裁了（cpucaps 清单 + 生成脚本），
+          # archprepare 因此报 "No rule to make target ..."。两者都是纯文本，
+          # 从上游同版本取回即可。
+          for f in arch/arm64/tools/cpucaps arch/arm64/tools/gen-cpucaps.awk; do
+            t="$HDR/$f"
+            [ -f "$t" ] && continue
+            mkdir -p "$(dirname "$t")"
+            curl -fsSL -o "$t" \
+              "https://raw.githubusercontent.com/torvalds/linux/v6.18/$f" || rm -f "$t"
+            echo "fetched $f: $([ -f "$t" ] && echo ok || echo FAILED)"
+          done
 
           make -C "$HDR" -j"$(nproc)" \
             ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
-            modules_prepare < /dev/null 2>&1 | tail -8 || true
+            modules_prepare < /dev/null 2>&1 | tail -10 || true
 
-          # 兜底：万一 archprepare 仍过不去，就直接编这两个 host 程序
+          # 兜底：archprepare 若仍过不去，先造出生成的空头，再单独编 scripts/mod
           if [ ! -x "$HDR/scripts/mod/modpost" ]; then
-            for obj in scripts/basic scripts/mod; do
-              make -C "$HDR" -j"$(nproc)" \
-                ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
-                -f scripts/Makefile.build obj="$obj" < /dev/null 2>&1 | tail -6 || true
-            done
+            GEN="$HDR/arch/arm64/include/generated/asm/cpucap-defs.h"
+            mkdir -p "$(dirname "$GEN")"
+            [ -f "$GEN" ] || : > "$GEN"
+            make -C "$HDR" -j"$(nproc)" \
+              ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
+              modules_prepare < /dev/null 2>&1 | tail -8 || true
           fi
 
           test -x "$HDR/scripts/basic/fixdep"
