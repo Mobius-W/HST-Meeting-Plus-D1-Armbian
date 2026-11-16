@@ -60,13 +60,30 @@ jobs:
 
       - name: Build modules
         run: |
-          set -eux
+          set -u
+          LOG=/tmp/build.log
+          : > "$LOG"
+          rc=0
           for m in kernel-modules/*/; do
             [ -f "$m/Makefile" ] || continue
-            echo "==> building $m"
-            make -C "$HDR" M="$PWD/${m%/}" \
-                 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" modules
+            echo "==> building $m" | tee -a "$LOG"
+            if ! make -C "$HDR" M="$PWD/${m%/}" \
+                 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
+                 modules >> "$LOG" 2>&1; then
+              rc=1
+            fi
           done
+          echo "---- tail of build log ----"
+          tail -60 "$LOG"
+          if [ "$rc" -ne 0 ]; then
+            # 把错误行变成注解，方便从 API 直接读到（日志下载经常被网络掐）
+            grep -E "error:|Error [0-9]|unrecognized|No such file" "$LOG" \
+              | head -15 \
+              | while IFS= read -r line; do
+                  echo "::error::$line"
+                done
+            exit 1
+          fi
 
       - name: Inspect result
         run: |
