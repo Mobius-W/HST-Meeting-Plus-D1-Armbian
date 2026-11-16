@@ -33,9 +33,17 @@ jobs:
 
       - name: Install cross toolchain
         run: |
+          set -eux
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu make bc bison flex libssl-dev libelf-dev
+            make bc bison flex libssl-dev libelf-dev
+          # 内核 6.18 的 Makefile 无条件加了 -fmin-function-alignment=8，
+          # 那是 GCC 14 才有的选项；noble 默认交叉 gcc 是 13，会直接报
+          # "unrecognized command-line option"。所以固定用 gcc-14。
+          sudo apt-get install -y --no-install-recommends \
+            gcc-14-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          aarch64-linux-gnu-gcc-14 --version | head -1
+          echo "CC=aarch64-linux-gnu-gcc-14" >> "$GITHUB_ENV"
 
       - name: Unpack kernel headers
         run: |
@@ -57,7 +65,7 @@ jobs:
             [ -f "$m/Makefile" ] || continue
             echo "==> building $m"
             make -C "$HDR" M="$PWD/${m%/}" \
-                 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+                 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" modules
           done
 
       - name: Inspect result

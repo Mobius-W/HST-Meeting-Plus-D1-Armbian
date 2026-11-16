@@ -18,3 +18,7 @@
 #   depmod -a && modprobe hr8833
 
 obj-m := hr8833.o
+#
+# 注意：内核 6.18 的 Makefile 无条件加 -fmin-function-alignment=8（GCC 14+），
+#      交叉编译必须用 gcc-14-aarch64-linux-gnu，gcc-13 会报
+#      "unrecognized command-line option"。
