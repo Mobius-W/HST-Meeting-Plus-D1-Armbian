@@ -296,7 +296,7 @@ static ssize_t speed_show(struct device *dev, struct device_attribute *attr,
 }
 
 static ssize_t speed_store(struct device *dev, struct device_attribute *attr,
-			   const char *buf, int count)
+			   const char *buf, size_t count)
 {
 	struct hr8833 *h = dev_get_drvdata(dev);
 	int val, ret;
@@ -323,7 +323,7 @@ static ssize_t sleep_state_show(struct device *dev,
 
 static ssize_t sleep_state_store(struct device *dev,
 				 struct device_attribute *attr,
-				 const char *buf, int count)
+				 const char *buf, size_t count)
 {
 	struct hr8833 *h = dev_get_drvdata(dev);
 	int val, ret;
@@ -360,7 +360,14 @@ static struct attribute *hr8833_attrs[] = {
 	&dev_attr_ocp.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(hr8833);
+
+/*
+ * 6.18 只保留单数组版 devm_device_add_group()（复数版已被移除），
+ * 因此不用 ATTRIBUTE_GROUPS() 宏，手工定义单个 group。
+ */
+static const struct attribute_group hr8833_group = {
+	.attrs = hr8833_attrs,
+};
 
 static int hr8833_probe(struct platform_device *pdev)
 {
@@ -399,8 +406,9 @@ static int hr8833_probe(struct platform_device *pdev)
 	gpiod_set_value(h->ain2, 0);
 	gpiod_set_value(h->sleep, 1);	/* 上电先休眠 */
 
-	hrtimer_init(&h->pwm_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	h->pwm_timer.function = hr8833_pwm_fn;
+	/* 6.16 起 hrtimer_init() 已被 hrtimer_setup() 取代（多一个 fn 参数）。 */
+	hrtimer_setup(&h->pwm_timer, hr8833_pwm_fn, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
 
 	INIT_DELAYED_WORK(&h->stop_work, hr8833_stop_work);
 
@@ -418,7 +426,7 @@ static int hr8833_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = devm_device_add_groups(dev, hr8833_groups);
+	ret = devm_device_add_group(dev, &hr8833_group);
 	if (ret) {
 		dev_err(dev, "sysfs group failed: %d\n", ret);
 		misc_deregister(&h->miscdev);
