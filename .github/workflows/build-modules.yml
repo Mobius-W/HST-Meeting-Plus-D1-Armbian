@@ -60,17 +60,39 @@ jobs:
 
       - name: Prepare headers (build host tools)
         run: |
-          # headers deb 里没有预编译的宿主机工具，只缺两个：
-          #   scripts/basic/fixdep    —— 不建它，编译规则直接 Error 127
-          #   scripts/mod/modpost     —— 不建它，链接阶段 "No rule to make target"
-          # 不能用 `modules_prepare`：它会走 archprepare，而 deb 裁掉了
-          # arch/arm64/tools/gen-cpucaps.awk（No rule to make target ...）
-          # 树外模块不编 arch 代码，所以只需要 scripts 这两块。
+          # 树外模块只需要两个宿主机工具，但 headers deb 一个都没带：
+          #   scripts/basic/fixdep  —— 缺了会在编译规则处 Error 127
+          #   scripts/mod/modpost   —— 缺了链接阶段 "No rule to make target"
+          #
+          # 两个坑：
+          #  1) headers 里的 .config 比 6.18.63 少若干新符号，直接 make 会在
+          #     syncconfig 阶段停下来问 "[N/m/?]" —— 用 </dev/null 取默认值。
+          #  2) deb 裁掉了 arch/arm64/tools/gen-cpucaps.awk，
+          #     modules_prepare → archprepare 会 "No rule to make target"。
+          #     这是纯 awk 脚本，从上游同版本取回即可。
           set -u
-          make -C "$HDR" -j"$(nproc)" scripts_basic 2>&1 | tail -5
+          AWK="$HDR/arch/arm64/tools/gen-cpucaps.awk"
+          if [ ! -f "$AWK" ]; then
+            mkdir -p "$(dirname "$AWK")"
+            curl -fsSL -o "$AWK" \
+              https://raw.githubusercontent.com/torvalds/linux/v6.18/arch/arm64/tools/gen-cpucaps.awk \
+              || rm -f "$AWK"
+          fi
+          echo "gen-cpucaps.awk: $([ -f "$AWK" ] && echo present || echo missing)"
+
           make -C "$HDR" -j"$(nproc)" \
             ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
-            scripts 2>&1 | tail -20
+            modules_prepare < /dev/null 2>&1 | tail -8 || true
+
+          # 兜底：万一 archprepare 仍过不去，就直接编这两个 host 程序
+          if [ ! -x "$HDR/scripts/mod/modpost" ]; then
+            for obj in scripts/basic scripts/mod; do
+              make -C "$HDR" -j"$(nproc)" \
+                ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
+                -f scripts/Makefile.build obj="$obj" < /dev/null 2>&1 | tail -6 || true
+            done
+          fi
+
           test -x "$HDR/scripts/basic/fixdep"
           test -x "$HDR/scripts/mod/modpost"
           ls -l "$HDR/scripts/basic/fixdep" "$HDR/scripts/mod/modpost"
