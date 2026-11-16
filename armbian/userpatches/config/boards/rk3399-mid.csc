@@ -64,3 +64,27 @@ BOOT_FDT_FILE="rockchip/rk3399-mid.dtb"
 #   write_uboot_platform()（family 官方实现）:
 #       dd if=u-boot-rockchip.bin of=$IMG bs=32k seek=1 conv=notrunc
 source "${SRC}/config/sources/vendors/radxa/rk3399-uboot.conf.sh"
+
+# ---- 摄像头：rkisp1 + Sony IMX307（2026-11-16）---------------------------
+# Armbian 官方 rockchip64 defconfig 默认不开 rkisp1，也不含本板移植的
+# imx307 驱动。用 custom_kernel_config hook 增量打开，避免整份 .config
+# 覆盖（那会让后续内核升级失去官方默认值）。
+# 依赖链大部分已在官方 config（MEDIA_PLATFORM_DRIVERS=y /
+# VIDEO_V4L2_SUBDEV_API=y / GENERIC_PHY_MIPI_DPHY=y / VIDEOBUF2_DMA_CONTIG=m），
+# 这里只补缺失的 ISP1、sensor、MIPI CSI-2 PHY 与 V4L2 core。
+function custom_kernel_config__rk3399_mid_camera() {
+	opts_y+=(
+		CONFIG_VIDEO_ROCKCHIP_ISP1
+	)
+	opts_m+=(
+		CONFIG_VIDEO_IMX307
+		CONFIG_VIDEO_V4L2
+		CONFIG_VIDEO_V4L2_I2C
+		CONFIG_V4L2_ASYNC
+		CONFIG_V4L2_CCI_I2C
+		CONFIG_REGMAP_I2C
+		CONFIG_PHY_ROCKCHIP_INNO_CSIDPHY
+		CONFIG_PHY_ROCKCHIP_DPHY_RX0
+	)
+	kernel_config_modifying_hashes+=("rk3399_mid_camera=$(declare -f custom_kernel_config__rk3399_mid_camera | sha256sum | cut -d ' ' -f1)")
+}

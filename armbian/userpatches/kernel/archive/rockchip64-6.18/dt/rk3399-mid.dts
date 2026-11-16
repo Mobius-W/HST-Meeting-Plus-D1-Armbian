@@ -748,3 +748,59 @@
 &spdif {
 	status = "okay";
 };
+
+/* ---------------- 摄像头：Sony IMX307 + rkisp1（2026-11-16）-------------
+ * 型号依据：原厂 /etc/cam_board.xml + IMX307_CMK-OT0712-FV2.xml +
+ *   libisp_isi_drv_IMX307.so + 实机 CHIP_ID@0x301e=0xb2（四重证据）。
+ * 硬件：i2c4 @0x1a，MIPI CSI-2 2-lane 到 ISP0，供电板上常开（vendor
+ *   cam_board.xml 把 AVDD/DOVDD/DVDD 全标 NC）⇒ 不声明 *-supply，
+ *   imx307.c 用 devm_regulator_get_optional 容忍缺 regulator。
+ * 唤醒：复位脚 GPIO1_B0（原厂 RK30_PIN1_PB0, active=0），实测拉高后
+ *   sensor 即在 0x1a 应答。xvclk 用 fixed-clock 37.125MHz，避免改动
+ *   SoC cif 时钟树（原厂 MCLK 可能模组自带，实测不给 MCLK 也能 I2C）。
+ */
+&{/} {
+	cam_xvclk: cam-xvclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <37125000>;
+		clock-output-names = "cam-xvclk";
+	};
+};
+
+&i2c4 {
+	imx307: camera@1a {
+		compatible = "sony,imx307";
+		reg = <0x1a>;
+		clocks = <&cam_xvclk>;
+		clock-names = "xvclk";
+		reset-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;   /* GPIO1_B0 */
+		/* PWDN 由板上常开，不声明 pwdn-gpios */
+
+		port {
+			imx307_out: endpoint {
+				remote-endpoint = <&mipi_in_imx307>;
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <222750000>;
+			};
+		};
+	};
+};
+
+&mipi_dphy_rx0 {
+	status = "okay";
+};
+
+&isp0 {
+	status = "okay";
+
+	ports {
+		port@0 {
+			mipi_in_imx307: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&imx307_out>;
+				data-lanes = <1 2>;
+			};
+		};
+	};
+};
