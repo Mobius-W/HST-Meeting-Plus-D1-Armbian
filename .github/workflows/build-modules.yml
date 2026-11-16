@@ -60,15 +60,20 @@ jobs:
 
       - name: Prepare headers (build host tools)
         run: |
-          # headers deb 里没有预编译的宿主机工具（scripts/basic/fixdep 等），
-          # 直接编模块会报 "/bin/sh: fixdep: not found" + Error 127。
-          # modules_prepare 会用宿主 gcc 把 fixdep / modpost 等建出来。
+          # headers deb 里没有预编译的宿主机工具，只缺两个：
+          #   scripts/basic/fixdep    —— 不建它，编译规则直接 Error 127
+          #   scripts/mod/modpost     —— 不建它，链接阶段 "No rule to make target"
+          # 不能用 `modules_prepare`：它会走 archprepare，而 deb 裁掉了
+          # arch/arm64/tools/gen-cpucaps.awk（No rule to make target ...）
+          # 树外模块不编 arch 代码，所以只需要 scripts 这两块。
           set -u
+          make -C "$HDR" -j"$(nproc)" scripts_basic 2>&1 | tail -5
           make -C "$HDR" -j"$(nproc)" \
             ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
-            modules_prepare 2>&1 | tail -25
+            scripts 2>&1 | tail -20
           test -x "$HDR/scripts/basic/fixdep"
-          ls -l "$HDR/scripts/basic/fixdep" "$HDR/scripts/mod/modpost" 2>/dev/null || true
+          test -x "$HDR/scripts/mod/modpost"
+          ls -l "$HDR/scripts/basic/fixdep" "$HDR/scripts/mod/modpost"
 
       - name: Build modules
         run: |
