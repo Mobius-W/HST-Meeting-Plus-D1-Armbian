@@ -113,22 +113,44 @@
 	};
 
 	/*
-	 * eDP 面板 —— 2026-11-16 结构性重写。
+	 * eDP 面板 —— 2026-11-16 最终形态（platform 面板 + 端口连线），实测点亮。
 	 *
-	 * ⛔ 旧写法 `edp-panel { compatible = "simple-panel"; }` 在内核 6.18 下永不生效：
-	 *    1) panel-simple.c 已删除 generic "simple-panel" 匹配（of_match 里已无此项）；
-	 *    2) 即便匹配上，panel_simple_probe() 对 DRM_MODE_CONNECTOR_eDP 直接
-	 *       返回 -EINVAL，日志 "eDP panels moved to panel-edp"。
-	 *    ⇒ 实测现象：edp-panel 无 driver，/sys/class/drm 只有 panfrost 的 card0，
-	 *      rockchip-dp 因找不到 panel 而永久 deferred，屏幕黑。
+	 * 三条弯路，都已在实机排除：
+	 *  ⛔ 1) `edp-panel { compatible = "simple-panel"; display-timings {...} }`（vendor 写法）
+	 *       内核 6.18 已无效：panel-simple 删掉了 generic "simple-panel" 匹配，
+	 *       且 panel_simple_probe() 见到 DRM_MODE_CONNECTOR_eDP 直接 -EINVAL
+	 *       （日志 "eDP panels moved to panel-edp"）⇒ 面板无 driver、dp 永久 deferred、黑屏。
+	 *  ⛔ 2) generic `"edp-panel"`：只能在 DP AUX 总线且必须有 EDID。
+	 *       本板 AUX 读不到 EDID（/sys/class/drm/card0-eDP-1/edid = 0 字节），
+	 *       num_modes/num_timings 全 0 ⇒ connector 一个 mode 都没有。
+	 *  ⛔ 3) 面板挂 aux-bus 子节点：analogix_dp_aux_done_probing() 只在 port 1
+	 *       （edp_out）的 endpoint 上找下游 panel/bridge，aux-bus 不在端口图里，
+	 *       connector 拿不到数据源 ⇒ 依旧黑屏。
 	 *
-	 * ✅ 现代正确写法：panel-edp 的 generic "edp-panel" 只支持挂在 DP AUX 总线上
-	 *    （panel-edp.c: "Skip one since \"edp-panel\" is only supported on DP AUX bus"）。
-	 *    因此面板节点必须移到 &edp 的 aux-bus 里，由 aux 总线枚举。
-	 * ⚠️ 但"eDP 规范强制要求 EDID"这一条在本板不成立：实测 AUX 读 EDID 失败
-	 *    （i2cdetect 在 DP-AUX 适配器上全空，i2cget 0x50 报 Read failed），
-	 *    必须改用带固定时序的面板条目，详见下面 aux-bus 内的说明。
+	 *  ✅ 正确写法（参 rk3399-sapphire-excavator）：把面板作为**根节点 platform 设备**，
+	 *     用 `port/endpoint` 与 &edp 的 port@1 互相 remote-endpoint。这样
+	 *     panel_edp_platform_probe() 用 platform_of_match（表首是 generic "edp-panel"，
+	 *     故匹配时 +1 跳过）拿到固定时序，完全不依赖 EDID。
+	 *
+	 *  面板规格：neweast wjfh116008a，1920x1080@60，138.5 MHz，bpc 6（=18bpp），
+	 *  260x150 mm。vendor `bus-format = <0x1009>`（MEDIA_BUS_FMT_RGB666_1X18）亦印证 6bpc。
+	 *  ⚠️ 注意 vendor 的消隐区分布与本条目不同（vendor hfp/HSW/hbp = 120/8/32、
+	 *     vfp/VSW/vbp = 23/2/6；mainline = 48/32/80、3/5/23），但 htotal 2080、
+	 *     vtotal 1111、时钟 138.5 MHz 完全一致，实机出图正常（eDP 的 DE 由 MSA 重建）。
 	 */
+	panel-edp {
+		compatible = "neweast,wjfh116008a";
+		backlight = <&backlight>;
+		power-supply = <&vcc3v3_s0>;
+		status = "okay";
+
+		port {
+			panel_in_edp: endpoint {
+				remote-endpoint = <&edp_out_panel>;
+			};
+		};
+	};
+
 	/*
 	 * 音频路由 —— 2026-11-16 按 es8316.c 实际 DAPM 表重写。
 	 *
@@ -185,32 +207,18 @@
 	status = "okay";
 
 	/*
-	 * 面板挂在 AUX 总线上（panel-edp generic "edp-panel" 的唯一合法位置）。
-	 * 时序来自 EDID；power-supply 对应 vendor 的 PMIC SWITCH_REG2（= vcc3v3_s0）。
-	 * 注意：vendor DTB 里面板没有 enable/reset GPIO，此前 DTS 里的
-	 * gpio3 RK_PA4 是推测值，且该脚实际归 GMAC（fe300000.ethernet），
-	 * 抢占会导致 pinctrl -EINVAL，已彻底删除。
+	 * port@1（输出侧）的 endpoint 是 analogix_dp_aux_done_probing() /
+	 * drm_of_find_panel_or_bridge() 唯一会去找下游面板的位置。
+	 * 必须与根节点 panel-edp 的 endpoint 互相 remote-endpoint，否则
+	 * connector 找不到面板 ⇒ 无 mode ⇒ 黑屏。
 	 */
-	aux-bus {
-		/*
-		 * ⛔ 不能用 generic "edp-panel"：它走 generic_edp_panel_probe()，
-		 *    必须从 AUX 读到 EDID 才能确定时序。本板实测读不到 EDID
-		 *    （dmesg: "Couldn't read EDID for ID; using conservative timings"），
-		 *    结果 desc->num_timings/num_modes 全为 0 ⇒ connector 一个 mode 都没有，
-		 *    /sys/class/drm/card0-eDP-1/modes 为空，屏永远点不亮。
-		 *
-		 * ✅ 改用与 vendor 时序完全吻合的固定面板条目 neweast,wjfh116008a：
-		 *    clock 138500 kHz、1920x1080、NHSYNC|NVSYNC、bpc 6、260x150mm。
-		 *    htotal = 1920+48+32+80 = 2080，vtotal = 1080+3+5+23 = 1111，
-		 *    与 vendor display-timings 解出的总时序完全一致（138.5MHz@60Hz）。
-		 *    该条目的 num_modes=2 ⇒ 走 panel_edp_get_display_modes()，
-		 *    不依赖 EDID 即可注册 1920x1080@60 模式。
-		 */
-		panel: panel {
-			compatible = "neweast,wjfh116008a";
-			backlight = <&backlight>;
-			power-supply = <&vcc3v3_s0>;
-			status = "okay";
+	ports {
+		port@1 {
+			reg = <1>;
+
+			edp_out_panel: endpoint {
+				remote-endpoint = <&panel_in_edp>;
+			};
 		};
 	};
 };
