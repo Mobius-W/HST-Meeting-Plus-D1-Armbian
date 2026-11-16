@@ -61,6 +61,20 @@ static const u8 es7243_start_seq[][2] = {
 	{ 0x05, 0x13 },
 };
 
+/*
+ * ESP-ADF（ESP32 板实测可用）的 ES7243 从机模式最小序列：
+ *   0x00=0x01, 0x06=0x00, 0x05=0x1b, 0x01=0x0c, 0x08=gain, 0x05=0x13
+ * 与 vendor 相比省掉了 0x02/0x03/0x04/0x07/0x09 这几项时钟分频。
+ * seq=esp 时用它做对照实验（见 ESPHome es7243.cpp / ESP-ADF es7243.c）。
+ */
+static const u8 es7243_start_seq_min[][2] = {
+	{ 0x06, 0x00 },
+	{ 0x05, 0x1b },
+	{ 0x01, 0x0c },
+	{ 0x08, 0x41 },	/* 增益：0x12 芯片仍改 0x21 */
+	{ 0x05, 0x13 },
+};
+
 /* vendor es7243_set_standby 表：4 对 */
 static const u8 es7243_standby_seq[][2] = {
 	{ 0x06, 0x05 },
@@ -112,6 +126,10 @@ MODULE_PARM_DESC(dump_regs, "dump regs 0x00..0x0F to dmesg after start/standby")
  * （RX 复用 TX 的时钟脚）。simple-audio-card 没有对应的 DT 属性，所以先在这里
  * 直接改 rtd->dai_link。等验证过后再换成自写 machine driver 的正规做法。
  */
+static int seq_variant;
+module_param(seq_variant, int, 0644);
+MODULE_PARM_DESC(seq_variant, "0 = vendor 11-write sequence, 1 = ESP-ADF minimal 6-write");
+
 static bool auto_bclk_ratio = true;
 module_param(auto_bclk_ratio, bool, 0644);
 MODULE_PARM_DESC(auto_bclk_ratio, "set cpu dai bclk_ratio = 32 * channels");
@@ -196,14 +214,23 @@ static int adc_init_one(struct mid_audio *priv, int c)
 
 static int adc_start_one(struct mid_audio *priv, int c)
 {
-	int i, ret;
+	const u8 (*tbl)[2];
+	int n, i, ret;
 
-	for (i = 0; i < ARRAY_SIZE(es7243_start_seq); i++) {
-		u8 reg = es7243_start_seq[i][0];
-		u8 val = es7243_start_seq[i][1];
+	if (seq_variant == 1) {
+		tbl = es7243_start_seq_min;
+		n = ARRAY_SIZE(es7243_start_seq_min);
+	} else {
+		tbl = es7243_start_seq;
+		n = ARRAY_SIZE(es7243_start_seq);
+	}
 
-		if (i == ES7243_START_CASCADE_IDX &&
-		    priv->adc[c].addr == ES7243_SYNC_ADDR)
+	for (i = 0; i < n; i++) {
+		u8 reg = tbl[i][0];
+		u8 val = tbl[i][1];
+
+		/* 级联差异点：0x12 芯片 reg 0x08 的增益值改成 0x21 */
+		if (reg == 0x08 && priv->adc[c].addr == ES7243_SYNC_ADDR)
 			val = 0x21;
 
 		ret = adc_write(priv, c, reg, val);
@@ -211,8 +238,8 @@ static int adc_start_one(struct mid_audio *priv, int c)
 			return ret;
 	}
 
-	/* 原厂驱动不写 0x0C（TDM_MODE/TDM_FLAG）；mainline 若要做 4ch TDM
-	 * 级联才需要补写，具体值由 module param 在板上试。 */
+	/* 原厂驱动不写 0x0C（ES7243E 的 TDM_MODE/TDM_FLAG）；mainline 若要做
+	 * 4ch TDM 级联才需要补写，具体值由 module param 在板上试。 */
 	if (priv->adc[c].addr == ES7243_SYNC_ADDR && tdm_sync >= 0)
 		return adc_write(priv, c, 0x0c, tdm_sync);
 	if (priv->adc[c].addr != ES7243_SYNC_ADDR && tdm_first >= 0)
