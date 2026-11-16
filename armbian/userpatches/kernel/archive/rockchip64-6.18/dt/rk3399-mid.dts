@@ -218,10 +218,48 @@
 		ain1-gpios = <&gpio2 RK_PA2 GPIO_ACTIVE_HIGH>;
 		ain2-gpios = <&gpio2 RK_PA3 GPIO_ACTIVE_HIGH>;
 		sleep-gpios = <&gpio2 RK_PA4 GPIO_ACTIVE_LOW>;
-		ocp-det-gpios = <&gpio2 RK_PA5 GPIO_ACTIVE_LOW>;
+		/*
+		 * nFAULT 是开漏输出（datasheet: "Logic low when in fault
+		 * condition"），必须有上拉才能读到高电平。这里显式带
+		 * GPIO_PULL_UP flag，与 vendor 的 flag=0x08 一致；
+		 * 只靠 pinctrl 的 pcfg_pull_up 在 gpiolib request 之后会被
+		 * 覆盖，实测过 pin69 仍是 pull-down。
+		 */
+		ocp-det-gpios = <&gpio2 RK_PA5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&motor_pins>;
 		status = "okay";
+	};
+
+	/*
+	 * DC 插入检测 —— 原来完全没有，导致 cw2015 每 2 秒刷一条
+	 *   "Failed to get supply state: -19"（power_supply_am_i_supplied
+	 *   找不到供电源返回 -ENODEV），且电池状态永远是 Discharging。
+	 *
+	 * 引脚来自 vendor DTS：
+	 *   dc_det_gpio   = <&gpio1 RK_PA7 GPIO_ACTIVE_HIGH>   ← 插 DC 时拉高
+	 *   charge-ok     = <&gpio1 RK_PC7>                     ← 充电 IC 状态（开漏）
+	 */
+	dc_charger: dc-charger {
+		compatible = "gpio-charger";
+		charger-type = "mains";
+		gpios = <&gpio1 RK_PA7 GPIO_ACTIVE_HIGH>;
+		charge-status-gpios = <&gpio1 RK_PC7 GPIO_ACTIVE_LOW>;
+	};
+
+	/*
+	 * 电池静态参数 —— CW2015 的 CHARGE_FULL_DESIGN / CURRENT_NOW /
+	 * TIME_TO_EMPTY 全部依赖它，没有这个节点读出来全是 0。
+	 *
+	 * ⚠️ 容量 5000 mAh 为估值（Android 镜像与 ADB 基线里都没留容量信息），
+	 *    待实测放电曲线校准。电压范围按 2S 锂电包。
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion";
+		charge-full-design-microamp-hours = <5000000>;
+		voltage-min-design-microvolt = <6000000>;
+		voltage-max-design-microvolt = <8400000>;
 	};
 };
 
@@ -433,6 +471,20 @@
 			0x26 0x70 0xa2 0xc3 0x80 0xbf 0x94 0xcb
 			0x2f 0x7d 0x72 0xa5 0xb5 0xc1 0x58 0xc9>;
 		cellwise,monitor-interval-ms = <2000>;
+		monitored-battery = <&battery>;
+		power-supplies = <&dc_charger>;
+
+		/*
+		 * ⚠️ 电压少报一半（已知未解决）
+		 * vendor DTS 还有 divider_res1 = divider_res2 = 0xc8 (200)，
+		 * 即电池电压经 200k/200k 分压后才进 CW2015。
+		 * mainline cw2015_battery.c 的 cw_get_voltage() 只做
+		 *   voltage_mv = avg * 312 / 1024
+		 * 没有 divider 补偿，所以 voltage_now 只有实际值的一半。
+		 * 实测 3.97V → 实际电池 7.95V（2S 电池包）。
+		 * SOC 不受影响（芯片内部按单体电压查表）。
+		 * 要修需要给驱动打补丁加 divider 支持。
+		 */
 	};
 };
 
