@@ -690,20 +690,20 @@
  * 本板硬件清单里没有 Type-C，vcc5v0_typec0 本就是 Sapphire 参考设计的冗余，
  * 改指向已注册且 always-on 的 vcc5v0_host 即可解开死锁。
  */
-&usb2phy0_host {
+&u2phy0_host {
 	phy-supply = <&vcc5v0_host>;
 	status = "okay";
 };
 
-&usb2phy0_otg {
+&u2phy0_otg {
 	status = "okay";
 };
 
-&usb2phy1_host {
+&u2phy1_host {
 	status = "okay";
 };
 
-&usb2phy1_otg {
+&u2phy1_otg {
 	status = "okay";
 };
 
