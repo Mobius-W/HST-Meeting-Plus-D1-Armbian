@@ -58,6 +58,18 @@ jobs:
           echo "HDR=$HDR" >> "$GITHUB_ENV"
           cat "$HDR/include/config/kernel.release"
 
+      - name: Prepare headers (build host tools)
+        run: |
+          # headers deb 里没有预编译的宿主机工具（scripts/basic/fixdep 等），
+          # 直接编模块会报 "/bin/sh: fixdep: not found" + Error 127。
+          # modules_prepare 会用宿主 gcc 把 fixdep / modpost 等建出来。
+          set -u
+          make -C "$HDR" -j"$(nproc)" \
+            ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
+            modules_prepare 2>&1 | tail -25
+          test -x "$HDR/scripts/basic/fixdep"
+          ls -l "$HDR/scripts/basic/fixdep" "$HDR/scripts/mod/modpost" 2>/dev/null || true
+
       - name: Build modules
         run: |
           set -u
@@ -76,12 +88,17 @@ jobs:
           echo "---- tail of build log ----"
           tail -60 "$LOG"
           if [ "$rc" -ne 0 ]; then
-            # 把错误行变成注解，方便从 API 直接读到（日志下载经常被网络掐）
-            grep -E "error:|Error [0-9]|unrecognized|No such file" "$LOG" \
+            # 把错误行变成注解，方便从 API 直接读到（日志下载经常被网络掐）。
+            # 除了 error: 行，也把日志尾部整体带出来 —— Error 127 这类
+            # “命令找不到”不会出现在 error: 行里。
+            grep -E "error:|Error [0-9]|unrecognized|No such file|not found" "$LOG" \
               | head -15 \
               | while IFS= read -r line; do
                   echo "::error::$line"
                 done
+            tail -12 "$LOG" | while IFS= read -r line; do
+              echo "::error::TAIL $line"
+            done
             exit 1
           fi
 
