@@ -541,13 +541,16 @@
 	status = "disabled";
 };
 
-/* 本板无 HDMI 输出（会议一体机，只有 eDP 内屏） */
+/*
+ * 板载 miniHDMI 接口。ddc-i2c-bus 由基础 dtsi 指向 i2c3(ff130000)，实测该总线
+ * 已 okay；RK3399 的 inno HDMI PHY 由 dw_hdmi-rockchip 内部处理，无需独立 phy 节点。
+ */
 &hdmi {
-	status = "disabled";
+	status = "okay";
 };
 
 &hdmi_sound {
-	status = "disabled";
+	status = "okay";
 };
 
 /* 背光 PWM 输出脚 */
