@@ -85,7 +85,7 @@
 2. **U-Boot 阶段必黑屏**。ophub U-Boot 里 `panel` / `backlight` / `drm` / `logo` / `bmp` / `rockchip_vop` 字符串计数全 0；要等内核 DRM + 我们的 DTB 加载完才亮。
 3. **默认 fdtfile 要改**：`armbianEnv.txt` 里 `fdtfile=rockchip/rk3399-tn3399-v3.dtb` → 改成 `rockchip/rk3399-mid.dtb`，并把我们的 DTB 放进 `/boot/dtb/rockchip/`。
 4. **U-Boot 无法自己找到 boot 分区**（不认 PARM）⇒ 需要预设 env 走绝对扇区 `mmc read` + `booti`，或接串口手动引导；env 偏移由 DT 的 `u-boot,mmc-env-offset` 指定，待验。
-5. **外设缺失**：HR8833 云台、SN3732A×3 功放、ES7243×2 麦阵、Neoway 4G 无 mainline 驱动；Goodix GT9xx、ES8316、AP6255 有驱动但要改 DTS + 补 nvram。
+5. **外设缺失**：HR8833 云台、SN3732A×3（**LED 灯控，非功放**）、ES7243×2 麦阵、Neoway 4G 无 mainline 驱动；Goodix GT9xx、ES8316、AP6255 有驱动但要改 DTS + 补 nvram。
 
 ## 六、推荐落地路径（按实测坐标重排，不是整盘刷）
 

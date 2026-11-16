@@ -162,7 +162,8 @@
 	 *    实测 dmesg 四条 "Failed to add route ..." 正是这个原因，
 	 *    加上 card 注册直接挂掉（no soundcards）。
 	 *
-	 * 本板硬件：ES8316 的 HPOL/HPOR 一路接耳机，一路接 SN3732A 功放推喇叭，
+	 * 本板硬件：ES8316 的 HPOL/HPOR 一路接耳机，一路接板载模拟输入 Class-D
+	 * 功放推喇叭（该功放无 I2C，靠 spk-con / amp-en 两个 GPIO 使能，无 DTS 节点），
 	 * 所以 Speaker 也从 HPOL/HPOR 取。麦克风走 codec 内部 MIC1/MIC2，
 	 * DTS 不需要（也不应该）重复声明。
 	 */
@@ -386,30 +387,37 @@
 	};
 };
 
-/* ---------------- I2C6：SN3732A 功放 ×3（ff150000）---------------- */
+/* ---------------- I2C6：SN3732A LED 控制器 ×3（ff150000）---------------- */
 /*
- * 硬件清单：SN3732A ×3 @ 0x50 / 0x52 / 0x53，0x50 那颗带 enable-gpio
- * GPIO2 RK_PB0。mainline 无驱动，先让总线可用（可用 i2cdetect 验证硬件），
- * 驱动后续自写。
+ * ★ 2026-11-16 判伪：SN3732A 是 Si-En「趣味灯 / 矩阵 LED」驱动，**不是音频功放**。
+ *   同族 SN3726(16 位 LED) / SN3728(音频调制 LED 矩阵) / SN3730(音频调制 LED 矩阵)
+ *   / SN3731(144 颗 LED 矩阵) 全部是 LED 驱动；"audio modulated" 指灯效随音乐呼吸。
+ *   三颗同挂靠 I2C 地址区分（该族规格：地址可选，最多支持挂四颗），与声道无关。
+ *   喇叭功放是另一颗无 I2C 的模拟输入 Class-D，靠 spk-con(GPIO4_D1) /
+ *   amp-en(GPIO4_A5) 使能，故本 DTS 无其节点。
+ *
+ * 节点：0x50 那颗带 enable-gpio = GPIO2 RK_PB0（灯控使能）。
+ * mainline 无 si-en,sn3732a 驱动（leds-is31fl32xx 只收了 sn3216/sn3218），
+ * 这里只让总线可用以便 i2cdetect 验证硬件；节点名用 led@ 而非 amp@。
  */
 &i2c6 {
 	status = "okay";
 	clock-frequency = <400000>;
 
-	amp@50 {
+	led@50 {
 		compatible = "si-en,sn3732a";
 		reg = <0x50>;
 		enable-gpio = <&gpio2 RK_PB0 GPIO_ACTIVE_HIGH>;
 		status = "okay";
 	};
 
-	amp@52 {
+	led@52 {
 		compatible = "si-en,sn3732a";
 		reg = <0x52>;
 		status = "okay";
 	};
 
-	amp@53 {
+	led@53 {
 		compatible = "si-en,sn3732a";
 		reg = <0x53>;
 		status = "okay";

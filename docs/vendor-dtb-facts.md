@@ -71,7 +71,7 @@
 | `/wireless-wlan` | `wlan-platdata` | `wifi_chip_type = "ap6255"`、wake-irq=`gpio0 3`、`sdio_vref=0x708(1800mV)` |
 | `/wireless-bluetooth` | `bluetooth-platdata` | reset=`gpio0 9`、wake=`gpio2 0x1a`、wake-host-irq=`gpio0 4` |
 | `/sdio-pwrseq` | `mmc-pwrseq-simple` | reset=`gpio0 0x0a`(低有效)，ext_clock=`<&rk808 1>` ✅ 与现 DTS 一致 |
-| `/sn3732a-*` | `pinctrl` 组 | 3 路 LED 驱动，仅 pinctrl |
+| `/sn3732a-*` | `pinctrl` 组 | ✅ **2026-11-16 核实为 LED 驱动**（Si-En SN3726/3728/3730/3731 同族均为 LED 矩阵/呼吸灯驱动）。此条原名写「3 路 LED 驱动」，正确；后续文档一度误传为「音频功放」，已判伪。本板无 `gpio-leds` / `leds` 节点，灯只能由这三颗控制 |
 | `/ak8963` `/cm3218` `/kxtj2` | pinctrl 组 | 磁力计/光感/加速度，i2c 上无常驻节点 |
 
 ## 7. 待实测校准（写进 DTS 前必须验证）

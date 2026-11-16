@@ -6,7 +6,7 @@ RK3399 MID 板（Rockchip Sapphire + Excavator 参考设计的定制会议平板
 
 ## 硬件一句话
 
-RK3399 / **4 GB LPDDR4（2ch×2048MB，416→856 MHz）** / 8GB eMMC（DG4008）/ eDP 1920×1080 / GT9xx 触摸 / ES8316 + 2×ES7243 + 3×SN3732A / HR8833 云台 / AP6255 WiFi+BT / 千兆 RGMII / 2S 8.4V 电池 / 双 ISP / 无 SD 卡槽 / UART2 调试口。
+RK3399 / **4 GB LPDDR4（2ch×2048MB，416→856 MHz）** / 8GB eMMC（DG4008）/ eDP 1920×1080 / GT9xx 触摸 / ES8316 + 2×ES7243（麦阵）+ 3×SN3732A（**LED 灯控，不是功放**）/ 无 I2C 的模拟输入 Class-D 功放（spk-con + amp-en 控制）/ HR8833 云台 / AP6255 WiFi+BT / 千兆 RGMII / 2S 8.4V 电池 / 双 ISP / 无 SD 卡槽 / UART2 调试口。
 
 > ⛔ **2026-11-15 判伪**：本文件原写「4GB DDR3-1600 / dmc 800 MHz」，**已作废**。用户核对 DRAM 丝印 + TTL 训练日志双证钉死为 **LPDDR4**。原厂 DTB 的 `ddr3_speed_bin=0x15` 只是 vendor BSP DMC 驱动的**属性名**，不是物理 DRAM 类型。任何基于「本板 DDR3」的选型/参数/排除理由一律不再引用。详见 `docs/ophub-固件选型.md` 文件头判伪声明与 §十六。
 > 另：本仓 `uboot/` + `dist/` 是 **11-10 的早期 mainline/SPI 实验线**（115200 串口、`u-boot.itb`），**不是当前主线**；当前编译主线为 `.github/workflows/build-armbian.yml` + `armbian/userpatches/`，以 `armbian/build` 官方源码为基线。
