@@ -58,50 +58,27 @@ jobs:
           echo "HDR=$HDR" >> "$GITHUB_ENV"
           cat "$HDR/include/config/kernel.release"
 
-      - name: Prepare headers (build host tools)
+      - name: Provide host tools (fixdep / modpost)
         run: |
-          # 树外模块只需要两个宿主机工具，但 headers deb 一个都没带：
-          #   scripts/basic/fixdep  —— 缺了会在编译规则处 Error 127
-          #   scripts/mod/modpost   —— 缺了链接阶段 "No rule to make target"
-          #
-          # 两个坑：
-          #  1) headers 里的 .config 比 6.18.63 少若干新符号，直接 make 会在
-          #     syncconfig 阶段停下来问 "[N/m/?]" —— 用 </dev/null 取默认值。
-          #  2) deb 裁掉了 arch/arm64/tools/gen-cpucaps.awk，
-          #     modules_prepare → archprepare 会 "No rule to make target"。
-          #     这是纯 awk 脚本，从上游同版本取回即可。
+          # 树外模块要两个「宿主机」程序：scripts/basic/fixdep 和 scripts/mod/modpost。
+          # 我们这份 armbian headers deb 把它们连同 arch/arm64/tools/ 一起裁掉了，
+          # 自己用 modules_prepare 重建又会被裁掉的文件一路绊住（已试过，很脆）。
+          # 但这两个是 x86 宿主程序、与目标架构无关 —— 直接借发行版内核 headers
+          # 里编好的二进制即可。
           set -u
-          # deb 把 arch/arm64/tools/ 整个目录裁了，archprepare 因此报
-          # "No rule to make target .../{cpucaps,gen-cpucaps.awk,gen-sysreg.awk}"。
-          # 这个目录在 v6.18 里只有 5 个文件（Makefile + 两份清单 + 两个 awk），
-          # 全是纯文本，从上游取回即可。
-          for f in Makefile cpucaps gen-cpucaps.awk gen-sysreg.awk sysreg; do
-            t="$HDR/arch/arm64/tools/$f"
-            [ -f "$t" ] && continue
-            mkdir -p "$(dirname "$t")"
-            curl -fsSL -o "$t" \
-              "https://raw.githubusercontent.com/torvalds/linux/v6.18/arch/arm64/tools/$f" \
-              || rm -f "$t"
-            echo "fetched tools/$f: $([ -f "$t" ] && echo ok || echo FAILED)"
+          sudo apt-get install -y --no-install-recommends linux-headers-generic
+          for t in scripts/basic/fixdep scripts/mod/modpost; do
+            src=$(ls /usr/src/linux-headers-*/$t 2>/dev/null | head -1)
+            if [ -n "$src" ]; then
+              cp "$src" "$HDR/$t"
+              chmod +x "$HDR/$t"
+              echo "borrowed $t <- $src"
+            fi
           done
-
-          make -C "$HDR" -j"$(nproc)" \
-            ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
-            modules_prepare < /dev/null 2>&1 | tail -10 || true
-
-          # 兜底：archprepare 若仍过不去，先造出生成的空头，再单独编 scripts/mod
-          if [ ! -x "$HDR/scripts/mod/modpost" ]; then
-            GEN="$HDR/arch/arm64/include/generated/asm/cpucap-defs.h"
-            mkdir -p "$(dirname "$GEN")"
-            [ -f "$GEN" ] || : > "$GEN"
-            make -C "$HDR" -j"$(nproc)" \
-              ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" \
-              modules_prepare < /dev/null 2>&1 | tail -8 || true
-          fi
-
           test -x "$HDR/scripts/basic/fixdep"
           test -x "$HDR/scripts/mod/modpost"
-          ls -l "$HDR/scripts/basic/fixdep" "$HDR/scripts/mod/modpost"
+          "$HDR/scripts/basic/fixdep" 2>&1 | head -2 || true
+          "$HDR/scripts/mod/modpost" 2>&1 | head -2 || true
 
       - name: Build modules
         run: |
