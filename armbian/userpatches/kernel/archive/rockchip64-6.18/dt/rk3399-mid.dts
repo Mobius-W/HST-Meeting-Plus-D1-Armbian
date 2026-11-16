@@ -236,14 +236,19 @@
 	 *   "Failed to get supply state: -19"（power_supply_am_i_supplied
 	 *   找不到供电源返回 -ENODEV），且电池状态永远是 Discharging。
 	 *
-	 * 引脚来自 vendor DTS：
-	 *   dc_det_gpio   = <&gpio1 RK_PA7 GPIO_ACTIVE_HIGH>   ← 插 DC 时拉高
-	 *   charge-ok     = <&gpio1 RK_PC7>                     ← 充电 IC 状态（开漏）
+	 * 引脚来自 vendor DTS（原文 dc_det_gpio = <0x34 0x07 0x01>，flag 0x01 = ACTIVE_LOW）：
+	 *   dc_det_gpio   = <&gpio1 RK_PA7 GPIO_ACTIVE_LOW>    ← 插 DC 时拉低
+	 *   charge-ok     = <&gpio1 RK_PC7 GPIO_ACTIVE_LOW>    ← 充电 IC 状态（开漏）
+	 *
+	 * 2026-11-16 实测：插着 DC 时该脚读到 0。原先误写 ACTIVE_HIGH，导致
+	 * ONLINE 恒 0、电池恒报 Discharging —— 但充电实际在进行（CW2015 电压
+	 * 从 3.88V 升到 4.19V，×2 分压即 7.76→8.38V 可证）。极性改正后
+	 * ONLINE 应为 1、电池状态转 Charging。
 	 */
 	dc_charger: dc-charger {
 		compatible = "gpio-charger";
 		charger-type = "mains";
-		gpios = <&gpio1 RK_PA7 GPIO_ACTIVE_HIGH>;
+		gpios = <&gpio1 RK_PA7 GPIO_ACTIVE_LOW>;
 		charge-status-gpios = <&gpio1 RK_PC7 GPIO_ACTIVE_LOW>;
 	};
 
@@ -351,6 +356,11 @@
 		clocks = <&cru SCLK_I2S_8CH_OUT>;
 		clock-names = "mclk";
 		#sound-dai-cells = <0>;
+
+		avdd-supply = <&vcca3v0_codec>;
+		dvdd-supply = <&vcca1v8_codec>;
+		pvdd-supply = <&vcc3v3_sys>;
+
 		spk-con-gpio = <&gpio4 RK_PD1 GPIO_ACTIVE_HIGH>;
 		amp-en-gpio = <&gpio4 RK_PA5 GPIO_ACTIVE_HIGH>;
 	};
@@ -589,6 +599,57 @@
 &gmac {
 	tx_delay = <0x2d>;
 	rx_delay = <0x22>;
+};
+
+/* ---------------- USB Host 5V 使能：移到本板真实引脚 ---------------- */
+/*
+ * 2026-11-16 实测发现：mainline rk3399-sapphire.dtsi 把 vcc5v0_host 的使能脚
+ * 定在 GPIO4_D1（pin 25），那是 **Sapphire 参考设计** 的引脚，本板不是。
+ *
+ * 本板该脚的真实身份是 vendor 的 spk-con-gpio（喇叭功放控制）：
+ *   vendor es8316@11 { spk-con-gpio = <&gpio4 0x19 0x00>; }   // 0x19 = 25 = GPIO4_D1
+ * 而 vendor 实际的两路 USB 5V 使能是：
+ *   vcc5v0_host0 = <&gpio2 RK_PB4>   (0x0c = 12)
+ *   vcc5v0_host1 = <&gpio4 RK_PC3>   (0x1b = 27)
+ *
+ * 结果：vcc5v0_host 一直把 GPIO4_D1 当 USB 5V 使能拉高，等于占用喇叭控制脚；
+ * 同时真正的 USB 5V 使能脚（GPIO2_B4）无人管理。实测 USB 仍能用，是因为
+ * 5V 通路本身常通，但这属于"碰巧能用"，不是正确配置。
+ *
+ * 改正：把 vcc5v0_host 移到 GPIO2_B4（本板 host0 的真实位置），
+ * GPIO4_D1 让回给 spk-con。pinctrl 组 vcc5v0_host_en 配的是 GPIO4_D1，
+ * 必须一并删掉，否则仍会把该脚抢走。
+ */
+&vcc5v0_host {
+	gpio = <&gpio2 RK_PB4 GPIO_ACTIVE_HIGH>;
+	/delete-property/ pinctrl-names;
+	/delete-property/ pinctrl-0;
+};
+
+/* ---------------- 功放使能：常开 ---------------- */
+/*
+ * vendor es8316@11 里还有两条 mainline 驱动**不解析**的输出脚：
+ *   spk-con-gpio = <&gpio4 RK_PD1 GPIO_ACTIVE_HIGH>   // 喇叭功放使能
+ *   amp-en-gpio  = <&gpio4 RK_PA5 GPIO_ACTIVE_HIGH>   // 功放使能
+ * mainline es8316.c 只认 avdd/dvdd/pvdd，这两个属性被忽略 ⇒ 引脚无人驱动，
+ * 保持 SoC 复位默认（输入/浮空），功放一直处于关断。
+ * 用 gpio-hog 固定输出高，等效于 vendor 驱动里的开机拉高。
+ * 注意 spk-con 原被 mainline 的 vcc5v0_host 误占（见上文），移走后才能 hog。
+ */
+&gpio4 {
+	spk-con-hog {
+		gpio-hog;
+		gpios = <RK_PD1 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "spk-con";
+	};
+
+	amp-en-hog {
+		gpio-hog;
+		gpios = <RK_PA5 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "amp-en";
+	};
 };
 
 /* ---------------- USB2 PHY：修 phy-supply 死锁 ---------------- */
