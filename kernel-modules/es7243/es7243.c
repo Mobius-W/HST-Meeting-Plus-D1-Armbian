@@ -102,6 +102,20 @@ static bool dump_regs = true;
 module_param(dump_regs, bool, 0644);
 MODULE_PARM_DESC(dump_regs, "dump regs 0x00..0x0F to dmesg after start/standby");
 
+/*
+ * 本板只有一条 LRCK/SCLK 网络：ES7148 与两颗 ES7243 都吃 SoC 的
+ * LRCK_TX/SCLK_TX 这一对时钟脚（板级只有一条 I2S 时钟线，ADC 无从机时钟源）。
+ * 而 rockchip_i2s 默认是 TRCM_TXRX —— RX 用自己的 LRCK_RX/SCLK_RX 引脚，
+ * 那条线上没人驱动 ⇒ 采集永远读到 0xFFFF（FIFO 没被时钟推）。
+ *
+ * 修法：让 dai_link->symmetric_rate = 1，rockchip_i2s 就会切到 TRCM_TXONLY
+ * （RX 复用 TX 的时钟脚）。simple-audio-card 没有对应的 DT 属性，所以先在这里
+ * 直接改 rtd->dai_link。等验证过后再换成自写 machine driver 的正规做法。
+ */
+static bool trcm_txonly = true;
+module_param(trcm_txonly, bool, 0644);
+MODULE_PARM_DESC(trcm_txonly, "force dai_link->symmetric_rate (TRCM_TXONLY)");
+
 /* ------------------------------------------------------------------ */
 /* I2C 访问：与 vendor 完全一致 —— 一次 i2c_transfer 发 {reg, val} 两字节  */
 /* ------------------------------------------------------------------ */
@@ -299,6 +313,17 @@ static int mid_hw_params(struct snd_pcm_substream *substream,
 
 	if (substream->stream != SNDRV_PCM_STREAM_CAPTURE)
 		return 0;
+
+	/* 必须在 CPU DAI 的 hw_params 之前生效（codec 侧先于 cpu 侧调用） */
+	if (trcm_txonly) {
+		struct snd_soc_pcm_runtime *rtd =
+			snd_soc_substream_to_rtd(substream);
+
+		if (!rtd->dai_link->symmetric_rate) {
+			rtd->dai_link->symmetric_rate = 1;
+			dev_info(dai->dev, "forced dai_link->symmetric_rate (TRCM_TXONLY)\n");
+		}
+	}
 
 	/* 采集方向：此刻 SoC 侧时钟已按 hw_params 落频，正适合给 ADC 上电 */
 	return adc_power_up(priv);
