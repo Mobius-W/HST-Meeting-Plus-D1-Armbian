@@ -71,16 +71,18 @@ jobs:
           #     modules_prepare → archprepare 会 "No rule to make target"。
           #     这是纯 awk 脚本，从上游同版本取回即可。
           set -u
-          # deb 把 arch/arm64/tools/ 整个目录裁了（cpucaps 清单 + 生成脚本），
-          # archprepare 因此报 "No rule to make target ..."。两者都是纯文本，
-          # 从上游同版本取回即可。
-          for f in arch/arm64/tools/cpucaps arch/arm64/tools/gen-cpucaps.awk; do
-            t="$HDR/$f"
+          # deb 把 arch/arm64/tools/ 整个目录裁了，archprepare 因此报
+          # "No rule to make target .../{cpucaps,gen-cpucaps.awk,gen-sysreg.awk}"。
+          # 这个目录在 v6.18 里只有 5 个文件（Makefile + 两份清单 + 两个 awk），
+          # 全是纯文本，从上游取回即可。
+          for f in Makefile cpucaps gen-cpucaps.awk gen-sysreg.awk sysreg; do
+            t="$HDR/arch/arm64/tools/$f"
             [ -f "$t" ] && continue
             mkdir -p "$(dirname "$t")"
             curl -fsSL -o "$t" \
-              "https://raw.githubusercontent.com/torvalds/linux/v6.18/$f" || rm -f "$t"
-            echo "fetched $f: $([ -f "$t" ] && echo ok || echo FAILED)"
+              "https://raw.githubusercontent.com/torvalds/linux/v6.18/arch/arm64/tools/$f" \
+              || rm -f "$t"
+            echo "fetched tools/$f: $([ -f "$t" ] && echo ok || echo FAILED)"
           done
 
           make -C "$HDR" -j"$(nproc)" \
