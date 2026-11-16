@@ -112,6 +112,10 @@ MODULE_PARM_DESC(dump_regs, "dump regs 0x00..0x0F to dmesg after start/standby")
  * （RX 复用 TX 的时钟脚）。simple-audio-card 没有对应的 DT 属性，所以先在这里
  * 直接改 rtd->dai_link。等验证过后再换成自写 machine driver 的正规做法。
  */
+static bool auto_bclk_ratio = true;
+module_param(auto_bclk_ratio, bool, 0644);
+MODULE_PARM_DESC(auto_bclk_ratio, "set cpu dai bclk_ratio = 32 * channels");
+
 static bool trcm_txonly = true;
 module_param(trcm_txonly, bool, 0644);
 MODULE_PARM_DESC(trcm_txonly, "force dai_link->symmetric_rate (TRCM_TXONLY)");
@@ -314,7 +318,17 @@ static int mid_hw_params(struct snd_pcm_substream *substream,
 	if (substream->stream != SNDRV_PCM_STREAM_CAPTURE)
 		return 0;
 
-	/* 必须在 CPU DAI 的 hw_params 之前生效（codec 侧先于 cpu 侧调用） */
+	/* rockchip_i2s 默认 bclk_ratio=64（2 槽 x 32bit），多声道会把帧截短，
+	 * 必须在 CPU DAI 的 hw_params 之前改成 32*channels（codec 侧先于 cpu 侧） */
+	if (auto_bclk_ratio) {
+		struct snd_soc_pcm_runtime *rtd =
+			snd_soc_substream_to_rtd(substream);
+		struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+
+		snd_soc_dai_set_bclk_ratio(cpu_dai, 32 * ch);
+		dev_info(dai->dev, "bclk_ratio -> %u\n", 32 * ch);
+	}
+
 	if (trcm_txonly) {
 		struct snd_soc_pcm_runtime *rtd =
 			snd_soc_substream_to_rtd(substream);
@@ -366,7 +380,7 @@ static struct snd_soc_dai_driver mid_dai = {
 	.capture = {
 		.stream_name	= "Capture",
 		.channels_min	= 1,
-		.channels_max	= 4,
+		.channels_max	= 8,
 		.rates		= SNDRV_PCM_RATE_8000_48000,
 		.formats	= SNDRV_PCM_FMTBIT_S16_LE |
 				  SNDRV_PCM_FMTBIT_S24_LE |
