@@ -220,6 +220,9 @@ static void adc_dump(struct mid_audio *priv, const char *tag)
 
 static int adc_init_one(struct mid_audio *priv, int c)
 {
+	if (seq_variant == 3)
+		return 0;
+
 	return adc_write(priv, c, 0x00, 0x01);
 }
 
@@ -236,6 +239,9 @@ static int adc_start_one(struct mid_audio *priv, int c)
 	 * 本模式只把 0x00 置 0x01（上电），其余全部保持默认，用于判断
 	 * 「芯片到底要不要额外配置」。
 	 */
+	if (seq_variant == 3)
+		return 0;	/* 完全不碰芯片，便于手工配寄存器做实验 */
+
 	if (seq_variant == 2)
 		return adc_write(priv, c, 0x00, 0x01);
 
@@ -272,7 +278,7 @@ static int adc_start_one(struct mid_audio *priv, int c)
 
 static int adc_standby_one(struct mid_audio *priv, int c)
 {
-	if (seq_variant == 2)
+	if (seq_variant == 2 || seq_variant == 3)
 		return 0;
 
 	int i, ret;
