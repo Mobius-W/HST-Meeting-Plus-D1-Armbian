@@ -95,13 +95,15 @@ function custom_kernel_config__rk3399_mid_camera() {
 		# ISP1 的前置，**bool** 类型，只能 y/n。缺了它 ISP1 连符号都不出现。
 		# 前置链 MEDIA_PLATFORM_SUPPORT=y / MEDIA_PLATFORM_DRIVERS=y 官方 config 已有。
 		CONFIG_V4L_PLATFORM_DRIVERS
+		# 同样是 bool（run 44017787539 日志：warning: symbol value 'm' invalid for
+		# VIDEO_V4L2_I2C）。它本来默认就是 y，写进 opts_m 只是刷 warning，这里纠正归类。
+		CONFIG_VIDEO_V4L2_I2C
 	)
 	opts_m+=(
 		# tristate，depends on VIDEO_DEV(=m) ⇒ 只能 m
 		CONFIG_VIDEO_ROCKCHIP_ISP1
 		# sensor
 		CONFIG_VIDEO_IMX307
-		CONFIG_VIDEO_V4L2_I2C
 		CONFIG_V4L2_ASYNC
 		CONFIG_V4L2_CCI_I2C
 		CONFIG_REGMAP_I2C
