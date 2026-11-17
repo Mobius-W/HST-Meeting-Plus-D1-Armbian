@@ -281,6 +281,7 @@ static int adc_power_up(struct mid_audio *priv)
 
 	/* 芯片必须看到 MCLK 才应答 I2C：probe 里已常开，这里再兜一次底 */
 	if (priv->mclk_clk) {
+		clk_set_rate(priv->mclk_clk, priv->mclk ? priv->mclk : 12288000);
 		clk_prepare_enable(priv->mclk_clk);
 		usleep_range(20000, 25000);
 	}
@@ -508,6 +509,16 @@ static int mid_audio_probe(struct platform_device *pdev)
 		dev_warn(dev, "no mclk clock (%d), ADC may not answer I2C\n", ret);
 		priv->mclk_clk = NULL;
 	} else {
+		/*
+		 * 只 prepare_enable 不够：clock 链上 parent 未定频时 rate=0，
+		 * 引脚上没有波形，芯片照样不应答 I2C（实测 probe 报
+		 * "mclk 0 Hz enabled" 时 i2cget 全部 NAK）。必须先落频到
+		 * 12.288 MHz（48k x 256fs）。
+		 */
+		ret = clk_set_rate(priv->mclk_clk, 12288000);
+		if (ret)
+			dev_warn(dev, "mclk set_rate failed: %d\n", ret);
+
 		ret = clk_prepare_enable(priv->mclk_clk);
 		if (ret)
 			dev_warn(dev, "mclk enable failed: %d\n", ret);
