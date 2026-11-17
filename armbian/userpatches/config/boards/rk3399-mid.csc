@@ -69,20 +69,31 @@ source "${SRC}/config/sources/vendors/radxa/rk3399-uboot.conf.sh"
 # Armbian 官方 rockchip64 defconfig 默认不开 rkisp1，也不含本板移植的
 # imx307 驱动。用 custom_kernel_config hook 增量打开，避免整份 .config
 # 覆盖（那会让后续内核升级失去官方默认值）。
-# 依赖链大部分已在官方 config（MEDIA_PLATFORM_DRIVERS=y /
-# VIDEO_V4L2_SUBDEV_API=y / GENERIC_PHY_MIPI_DPHY=y / VIDEOBUF2_DMA_CONTIG=m），
-# 这里只补缺失的 ISP1、sensor、MIPI CSI-2 PHY 与 V4L2 core。
+# 依赖链：ISP1 在 6.18 的 Kconfig 是
+#   config VIDEO_ROCKCHIP_ISP1  tristate
+#       depends on V4L_PLATFORM_DRIVERS
+#       depends on VIDEO_DEV && OF
+#       depends on ARCH_ROCKCHIP || ARCH_MXC || COMPILE_TEST
+# ★ 2026-11-17 事故修正（核查 run 43993856054 产物的 .config 发现）：
+#   第一版只写了 CONFIG_VIDEO_ROCKCHIP_ISP1=y，结果 .config 里**根本没有这个符号**
+#   （既没有 =y，也没有 "# ... is not set"）。根因是
+#   `# CONFIG_V4L_PLATFORM_DRIVERS is not set` —— 依赖不满足时 Kconfig 让符号不可见，
+#   scripts/config 写进去的 =y 被随后的 olddefconfig 直接抹掉，连痕迹都不留。
+#   同时 VIDEO_DEV=m，ISP1 若要 =y 还得把 VIDEO_DEV 一并提到 y，污染面更大。
+#   ⇒ 正确做法：V4L_PLATFORM_DRIVERS 与 ISP1 都放 opts_m，走模块 rockchip-isp1.ko。
+#   （名字用 armbian 的扩展命名法 hook__扩展名，框架会自动合成 custom_kernel_config 包装器。）
 function custom_kernel_config__rk3399_mid_camera() {
-	opts_y+=(
-		CONFIG_VIDEO_ROCKCHIP_ISP1
-	)
 	opts_m+=(
+		# ISP1 的前置：缺了它 ISP1 连符号都不会出现在 .config 里
+		CONFIG_V4L_PLATFORM_DRIVERS
+		CONFIG_VIDEO_ROCKCHIP_ISP1
+		# sensor
 		CONFIG_VIDEO_IMX307
-		CONFIG_VIDEO_V4L2
 		CONFIG_VIDEO_V4L2_I2C
 		CONFIG_V4L2_ASYNC
 		CONFIG_V4L2_CCI_I2C
 		CONFIG_REGMAP_I2C
+		# MIPI CSI-2 PHY
 		CONFIG_PHY_ROCKCHIP_INNO_CSIDPHY
 		CONFIG_PHY_ROCKCHIP_DPHY_RX0
 	)
