@@ -3,7 +3,12 @@
 > 目标：用官方 `armbian/build` 源码，在 GitHub Actions 上直接编出可用的
 > `armbian .img` + `uboot.img` + `trust.bin` + `rk3399-mid.dtb`。
 > **不 fork armbian/build**，全部通过本仓库的 `armbian/userpatches/` 注入。
-> 最后更新：2026-11-11
+> 最后更新：2026-11-17（新增 §十 构建耗时与增量路径）
+>
+> ⚠ **§二 / §五 / §六 / §八 属 only-blobs 时代（≤2026-11-14）的记录，已作废**：
+> 11-15 起引导链切到 mainline `binman-atf-mainline`，引导件只剩单一 `u-boot-rockchip.bin`
+> （IDB@LBA64 + FIT@LBA16384 + MBR p1@32768），`trust.ini` / PARM 变体均不再使用。
+> 现状以 `.github/workflows/build-armbian.yml` 头部注释与 `docs/引导机制判定-20261115.md` 为准。
 
 ---
 
@@ -270,3 +275,119 @@ LBA1 (GPT 头)  : 全零 ✓
 2. eDP 面板 / GT9xx / ES8316 / CW2015 的实测校准（DTS 文件头列了 3 项待校准）。
 3. `linux/rk3399-mid.dts` 与 `armbian/userpatches/.../dt/rk3399-mid.dts` 目前是两份副本，后续合并为一处。
 4. 确认镜像内 `/boot/boot.scr` 确实存在（BOOTSTD 的 `BOOTMETH_SCRIPT` 只认 `boot/boot.scr`，`boot.cmd` 不算）。
+
+---
+
+## 十、构建耗时分解与增量路径（2026-11-17，只记录未实施）
+
+> 起因：一次内核改动要等 69 分钟，质疑「既然只要内核 deb，为什么每次都编整包镜像」。
+> 结论：**框架原生支持只编内核**（`./compile.sh kernel`），但内核本体编译才是真瓶颈，
+> 单靠换 target 只能省 20%；要压到个位数必须做 worktree 增量或干脆本地编 dtb。
+
+### 10.1 run17 实际耗时（Actions API `/actions/runs/{id}/jobs`）
+
+| # | 步骤 | 耗时 |
+|---|---|---|
+| 1–6 | setup / 3×checkout / userpatches / requirements | 1.1 min |
+| **7** | **Build Armbian image** | **67.3 min** |
+| 8–11 | Verify / Boot layout / Collect / upload-artifact | 0.7 min |
+| 20–23 | post + complete | 0.1 min |
+| | **job 总计** | **69.2 min** |
+
+⇒ 69 分钟里 97% 集中在一个 `./compile.sh build` 调用内，其余步骤合计不到 2 分钟。
+「Verify 断言」「上传 artifact」这些都不是耗时源。
+
+### 10.2 只编内核：框架原生目标（无需改 armbian/build）
+
+`lib/functions/cli/commands.sh` 里已注册（main 分支实测行号）：
+
+| 行 | 注册项 | 等价变量 |
+|---|---|---|
+| `:74` | `["kernel"]="artifact"` | — |
+| `:133` | `["kernel"]="WHAT='kernel' ${common_cli_artifact_vars}"` | `WHAT=kernel` |
+| `:141` | `["kernel-dtb"]="WHAT='kernel' KERNEL_DTB_ONLY='yes' …"` | 只编 DTB |
+| `:83` | `["uboot"]="artifact"` / `:145` `WHAT='uboot'` | 只编引导 |
+| `:76-77` | `kernel-patch` / `kernel-config` | 交互式改补丁 / 配置 |
+| `:81` | `["dts-check"]="WHAT='kernel' DTS_VALIDATE='yes' …"` | 只校验不编译 |
+
+对应命令（BOARD/BRANCH 必给，RELEASE 只影响 deb 版本串，本板固定 noble）：
+
+```bash
+./compile.sh kernel     BOARD=rk3399-mid BRANCH=current RELEASE=noble   # → linux-image/dtb/headers 三个 deb
+./compile.sh kernel-dtb BOARD=rk3399-mid BRANCH=current RELEASE=noble   # → 只产 dtb（KERNEL_DTB_ONLY=yes）
+./compile.sh uboot      BOARD=rk3399-mid BRANCH=current RELEASE=noble   # → linux-u-boot-*.deb
+```
+
+`WHAT=kernel` 走 `obtain_artifact kernel` → `compile_kernel()`，**不触发** debootstrap、
+不装 armbian 附属包、不组装/压缩镜像、不编 u-boot。产出的 `linux-image-current-rockchip64_*.deb`
+与现在 `dist/v17/` 里那份同名同结构 ⇒ 板上 `dpkg -i` 原地升级路线完全不变。
+
+### 10.3 能省多少（估算，未实测）
+
+| 被砍掉的环节 | 估算耗时 |
+|---|---|
+| u-boot binman 编译（v2026.10 + ATF FIT） | 3–5 min |
+| debootstrap noble + 装基础包 | 4–6 min |
+| 镜像组装 + `COMPRESS_OUTPUTIMAGE=img` | 2–3 min |
+| armbian-bsp-cli / zsh 等附属 deb | 1–2 min |
+| **合计可省** | **10–16 min** |
+| **kernel-only 预计** | **52–56 min（省 20%）** |
+
+剩下 50 分钟全是内核本体：rockchip64 全量 defconfig（≈4000 个 obj）+ 267 个 armbian 补丁
++ 本板加的 ISP1/imx307/es7243，在 4 vCPU / 16 GB 的 `ubuntu-24.04` runner 上就是这么快，
+**换 target 不会改变这段**。
+
+### 10.4 三条真正能提速的路径
+
+**路径 A：只改 DTS → 本地编 dtb，别上 CI（最高性价比）**
+
+dtc 是 host 工具，不需要 aarch64 交叉编译器；DTS 里只用到了 `dt-bindings` 宏。
+
+```bash
+# 一次性准备（本机 macOS）
+curl -L https://github.com/dgibson/dtc/archive/refs/tags/v1.7.2.tar.gz | tar xz
+cd dtc-1.7.2 && make -j8 NO_PYTHON=1 NO_YAML=1        # clang 可编，不需要 brew
+# 拉内核 6.18 的 dts 依赖（几 MB，只需 include/dt-bindings + rockchip 目录）
+cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp \
+    -I linux/include -I linux/arch/arm64/boot/dts \
+    rk3399-mid.dts | dtc -I dts -O dtb -o rk3399-mid.dtb    # 约 1 s
+```
+
+板上验证：`scp` 到 `/boot/dtb/rockchip/rk3399-mid.dtb` → `systemctl reboot` →
+`dmesg | grep -i <新节点>`。改 pinctrl / 加 sensor 节点 / 调 regulator 这类调试应一律走这条，
+30 秒一个来回，不占 CI 额度。⚠ 前提是本机 `dtc` 与内核 `scripts/dtc` 版本差异不至于改变输出，
+首次建议与 CI 产物 `dtb` 做 `dtc -I dtb -O dts` 归一化后 diff 一次。
+
+**路径 B：改驱动/补丁 → `kernel` + 缓存内核 worktree**
+
+armbian 官方的态度写在 `lib/functions/configuration/main-config.sh:63`：
+
+```bash
+declare -g USE_CCACHE="${USE_CCACHE:-no}"   # stop using ccache as our worktree is more effective
+```
+
+⇒ **官方推荐 worktree 增量，而不是 ccache**。需要缓存的是（`kernel-git-oras.sh:200`、`kernel.sh:11`）：
+
+```
+build/cache/sources/linux-kernel-worktree    # 内核源码树 + 上一轮 .o / .a
+build/cache/git-bare/kernel                  # 完整裸库
+build/cache/git-bare/shallow-kernel-6.18     # 浅克隆裸库
+build/cache/git-bundles/kernel
+```
+
+GA 侧做法：`actions/cache@v4` 挂上述目录，用**滚动 key**（`key: kernel-wt-${{ github.run_id }}`
++ `restore-keys: kernel-wt-`），这样补丁集变了也能 restore 上一份做增量，而不是整份 miss。
+代价：压缩后约 1.5–3 GB，首次构建照旧 50 min 且要额外花几分钟上传缓存；命中后只重编改动
+目标，预计 5–15 min。风险点：armbian 的 patcher 检测到补丁 hash 变化时会 `git reset --hard`
+重建工作树，此时缓存白搭但不会出错，属于「有收益无副作用」。
+另可配 `CLEAN_LEVEL=` 阻止默认的 `make clean` 把 `.o` 清掉。
+
+**路径 C：改引导 → `./compile.sh uboot`（约 5 min）**，改板级配置 + 内核 → 才需要回 `build` 出镜像。
+
+### 10.5 本次决定
+
+**不改 workflow**，仅记录。现有 `.github/workflows/build-armbian.yml` 仍只有
+`release` / `desktop` 两个输入，第 6 步固定 `./compile.sh build`，Verify 步骤里的
+U-Boot 魔数断言与镜像 LBA 断言也强依赖 `.img` 存在 —— 将来若要加 `build_target` 输入，
+Verify 必须同步按 target 分支裁剪，否则 kernel-only 会卡在「output/images 下没有 .img」。
+

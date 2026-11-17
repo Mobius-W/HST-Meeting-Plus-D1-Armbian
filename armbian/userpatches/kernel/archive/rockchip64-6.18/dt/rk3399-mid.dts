@@ -183,6 +183,33 @@
 		#sound-dai-cells = <0>;
 	};
 
+	/*
+	 * 复合 codec：mainline 版的「vendor es8316」
+	 *
+	 * 原厂结构是 es8316 codec 驱动统管播放(ES7148)与采集(2x ES7243)，
+	 * 两颗 ES7243 只是裸 i2c client，不在任何 sound card 里；4 麦数据从
+	 * i2s0 的 capture 通路进系统（原厂 es8316_pcm_startup -> es7243_start）。
+	 *
+	 * mainline 的 simple-audio-card 一个 dai_link 只能挂一个 codec DAI，
+	 * 要播放与采集共用 i2s0，就必须由一个 DAI 同时提供两个方向
+	 * ⇒ 本节点对应的驱动（kernel-modules/es7243/es7243.c）同时提供
+	 *   playback（ES7148 直通）与 capture（4ch，内含 ES7243 上电时序）。
+	 */
+	mic_array: mic-array {
+		compatible = "rockchip,rk3399-mid-audio";
+		#sound-dai-cells = <0>;
+		/*
+		 * ES7243 在没有 MCLK 之前不应答 I2C（厂商 ESPHome/ESP-ADF 驱动
+		 * 里明确写了这点）。由本驱动 probe 时打开并常开，不依赖
+		 * rockchip_i2s 的 runtime_resume —— ASoC 里 codec 的 hw_params
+		 * 先于 cpu dai 执行，那时 i2s 的 mclk 还没 enable。
+		 */
+		clocks = <&cru SCLK_I2S0_8CH>;
+		clock-names = "mclk";
+		everest,adc = <&es7243_0>, <&es7243_1>;
+		status = "okay";
+	};
+
 	es7148_sound: es7148-sound {
 		compatible = "simple-audio-card";
 		simple-audio-card,name = "rk3399-mid-es7148";
@@ -204,7 +231,12 @@
 		};
 
 		simple-audio-card,codec {
-			sound-dai = <&es7148>;
+			/*
+			 * 注意：不再是 &es7148（es7134 占位），而是能同时给
+			 * playback + capture 的复合 codec —— 否则 card 0 根本
+			 * 不会有 capture PCM（arecord -l 里看不到）。
+			 */
+			sound-dai = <&mic_array>;
 		};
 	};
 
@@ -570,6 +602,20 @@
 				<2 RK_PA5 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
+
+	/*
+	 * 摄像头 MCLK：GPIO2_B3 func3 = CIF_CLKOUT。
+	 * 依据 vendor DTS 的 cif-clkout 组（<0x02 0x0b 0x03 0xbc>，作 ISP pinctrl-0）
+	 * 与 cam_board.xml 的 SensorMclk=37125000。
+	 * ★ 2026-11-17 实测教训：mainline rkisp1 不带这个 pinctrl，脚一直 UNCLAIMED，
+	 *   clk_cifout 停在默认 6 MHz 无 consumer ⇒ sensor 拿不到 INCK，
+	 *   写 0x3000=STREAMING 后会自己退回 STANDBY，MIPI 无数据。
+	 */
+	camera {
+		cif_clkout: cif-clkout {
+			rockchip,pins = <2 RK_PB3 3 &pcfg_pull_none>;
+		};
+	};
 };
 
 /* ---------------- UART0：AP6255 蓝牙（BCM4345C0） ---------------- */
@@ -690,20 +736,20 @@
  * 本板硬件清单里没有 Type-C，vcc5v0_typec0 本就是 Sapphire 参考设计的冗余，
  * 改指向已注册且 always-on 的 vcc5v0_host 即可解开死锁。
  */
-&usb2phy0_host {
+&u2phy0_host {
 	phy-supply = <&vcc5v0_host>;
 	status = "okay";
 };
 
-&usb2phy0_otg {
+&u2phy0_otg {
 	status = "okay";
 };
 
-&usb2phy1_host {
+&u2phy1_host {
 	status = "okay";
 };
 
-&usb2phy1_otg {
+&u2phy1_otg {
 	status = "okay";
 };
 
@@ -749,33 +795,32 @@
 	status = "okay";
 };
 
-/* ---------------- 摄像头：Sony IMX307 + rkisp1（2026-11-16）-------------
+/* ---------------- 摄像头：Sony IMX307 + rkisp1（2026-11-16，11-17 修正）-----
  * 型号依据：原厂 /etc/cam_board.xml + IMX307_CMK-OT0712-FV2.xml +
  *   libisp_isi_drv_IMX307.so + 实机 CHIP_ID@0x301e=0xb2（四重证据）。
  * 硬件：i2c4 @0x1a，MIPI CSI-2 2-lane 到 ISP0，供电板上常开（vendor
  *   cam_board.xml 把 AVDD/DOVDD/DVDD 全标 NC）⇒ 不声明 *-supply，
- *   imx307.c 用 devm_regulator_get_optional 容忍缺 regulator。
- * 唤醒：复位脚 GPIO1_B0（原厂 RK30_PIN1_PB0, active=0），实测拉高后
- *   sensor 即在 0x1a 应答。xvclk 用 fixed-clock 37.125MHz，避免改动
- *   SoC cif 时钟树（原厂 MCLK 可能模组自带，实测不给 MCLK 也能 I2C）。
+ *   imx307.c 对 devm_regulator_get_optional() 的 -ENODEV 视为"无此 raíl"。
+ * 复位：GPIO1_B0（cam_board.xml: RK30_PIN1_PB0）。
+ *   ★ 2026-11-17 实测：物理拉低 ⇒ i2c 立刻 ENXIO；拉高 ⇒ 正常应答。
+ *   即复位有效=低、工作=高 ⇒ 必须 GPIO_ACTIVE_HIGH。
+ *   之前写 ACTIVE_LOW，驱动 __imx307_power_on() 末尾 set(1) 被翻译成物理低，
+ *   芯片被一直按在复位里，probe 报 "Unexpected sensor id(000000), ret(-5)"。
+ * MCLK：GPIO2_B3 func3 = CIF_CLKOUT，37.125 MHz（cam_board.xml SensorMclk）。
+ *   ★ 之前用 fixed-clock 占位是错的：那只骗过驱动，脚上并没有波形。
  */
-&{/} {
-	cam_xvclk: cam-xvclk {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <37125000>;
-		clock-output-names = "cam-xvclk";
-	};
-};
-
 &i2c4 {
 	imx307: camera@1a {
 		compatible = "sony,imx307";
 		reg = <0x1a>;
-		clocks = <&cam_xvclk>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cif_clkout>;
+		clocks = <&cru SCLK_CIF_OUT>;
 		clock-names = "xvclk";
-		reset-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;   /* GPIO1_B0 */
-		/* PWDN 由板上常开，不声明 pwdn-gpios */
+		assigned-clocks = <&cru SCLK_CIF_OUT>;
+		assigned-clock-rates = <37125000>;
+		reset-gpios = <&gpio1 8 GPIO_ACTIVE_HIGH>;   /* GPIO1_B0 */
+		/* PWDN1 = GPIO1_B1 板上常开，不声明 pwdn-gpios */
 
 		port {
 			imx307_out: endpoint {

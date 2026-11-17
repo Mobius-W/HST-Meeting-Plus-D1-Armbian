@@ -135,6 +135,46 @@ jobs:
             exit 1
           fi
 
+          echo
+          echo "=== 摄像头内核配置断言（防止 kconfig 静默丢弃）==="
+          # 教训：scripts/config 塞进去的符号若依赖不满足，Kconfig 会让它整行消失，
+          # 构建照样 success、日志里还可能有空壳 built-in.a 造成假阳性。
+          # 这里在产物 deb 里逐项硬校验，不满足直接 fail，避免又白等 70 分钟 + 800MB 下载。
+          KDEB=$(ls output/debs/linux-image-current-rockchip64_*.deb 2>/dev/null | head -1 || true)
+          if [ -z "$KDEB" ]; then
+            echo "::error::没找到 linux-image-current-rockchip64 deb，无法校验内核配置"
+            exit 1
+          fi
+          mkdir -p kpkg && dpkg-deb -x "$KDEB" kpkg
+          KCFG=$(find kpkg -name 'config-6.18*' | head -1 || true)
+          if [ -z "$KCFG" ]; then
+            echo "::error::内核 deb 里没有 config-6.18*"
+            exit 1
+          fi
+          echo "--- 使用 $KCFG"
+          cam_fail=0
+          for want in CONFIG_V4L_PLATFORM_DRIVERS=y CONFIG_VIDEO_ROCKCHIP_ISP1=m CONFIG_VIDEO_IMX307=m; do
+            if grep -qx "$want" "$KCFG"; then
+              echo "  OK   $want"
+            else
+              echo "::error::内核配置缺 $want（实际值：$(grep -E "^#? ?${want%%=*}[= ]" "$KCFG" | head -1 || echo '符号完全不存在')）"
+              cam_fail=1
+            fi
+          done
+          if ! find kpkg -name 'rockchip-isp1.ko' | grep -q .; then
+            echo "::error::没产出 rockchip-isp1.ko，ISP1 驱动未编"
+            cam_fail=1
+          else
+            echo "  OK   rockchip-isp1.ko 存在"
+          fi
+          if ! find kpkg -name 'imx307.ko' | grep -q .; then
+            echo "::error::没产出 imx307.ko"
+            cam_fail=1
+          else
+            echo "  OK   imx307.ko 存在"
+          fi
+          [ "$cam_fail" = "0" ] || exit 1
+
           IMG=$(ls output/images/*.img 2>/dev/null | head -1 || true)
           if [ -z "$IMG" ]; then
             echo "::error::output/images 下没有产出 .img"

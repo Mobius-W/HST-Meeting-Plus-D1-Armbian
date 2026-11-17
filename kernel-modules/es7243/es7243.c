@@ -38,7 +38,7 @@
 #include <linux/module.h>
 #include <linux/i2c.h>
 #include <linux/of.h>
-#include <linux/of_i2c.h>
+#include <linux/clk.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -59,6 +59,20 @@ static const u8 es7243_start_seq[][2] = {
 	{ 0x07, 0x80 },
 	{ 0x09, 0x00 },
 	{ 0x06, 0x00 },
+	{ 0x05, 0x13 },
+};
+
+/*
+ * ESP-ADF（ESP32 板实测可用）的 ES7243 从机模式最小序列：
+ *   0x00=0x01, 0x06=0x00, 0x05=0x1b, 0x01=0x0c, 0x08=gain, 0x05=0x13
+ * 与 vendor 相比省掉了 0x02/0x03/0x04/0x07/0x09 这几项时钟分频。
+ * seq=esp 时用它做对照实验（见 ESPHome es7243.cpp / ESP-ADF es7243.c）。
+ */
+static const u8 es7243_start_seq_min[][2] = {
+	{ 0x06, 0x00 },
+	{ 0x05, 0x1b },
+	{ 0x01, 0x0c },
+	{ 0x08, 0x41 },	/* 增益：0x12 芯片仍改 0x21 */
 	{ 0x05, 0x13 },
 };
 
@@ -84,6 +98,7 @@ struct mid_audio {
 	struct mid_adc adc[MID_ADC_MAX];
 	int num_adc;
 	unsigned int mclk;
+	struct clk *mclk_clk;
 	bool adc_on;
 };
 
@@ -103,6 +118,28 @@ static bool dump_regs = true;
 module_param(dump_regs, bool, 0644);
 MODULE_PARM_DESC(dump_regs, "dump regs 0x00..0x0F to dmesg after start/standby");
 
+/*
+ * 本板只有一条 LRCK/SCLK 网络：ES7148 与两颗 ES7243 都吃 SoC 的
+ * LRCK_TX/SCLK_TX 这一对时钟脚（板级只有一条 I2S 时钟线，ADC 无从机时钟源）。
+ * 而 rockchip_i2s 默认是 TRCM_TXRX —— RX 用自己的 LRCK_RX/SCLK_RX 引脚，
+ * 那条线上没人驱动 ⇒ 采集永远读到 0xFFFF（FIFO 没被时钟推）。
+ *
+ * 修法：让 dai_link->symmetric_rate = 1，rockchip_i2s 就会切到 TRCM_TXONLY
+ * （RX 复用 TX 的时钟脚）。simple-audio-card 没有对应的 DT 属性，所以先在这里
+ * 直接改 rtd->dai_link。等验证过后再换成自写 machine driver 的正规做法。
+ */
+static int seq_variant;
+module_param(seq_variant, int, 0644);
+MODULE_PARM_DESC(seq_variant, "0 = vendor 11-write sequence, 1 = ESP-ADF minimal 6-write");
+
+static bool auto_bclk_ratio = true;
+module_param(auto_bclk_ratio, bool, 0644);
+MODULE_PARM_DESC(auto_bclk_ratio, "set cpu dai bclk_ratio = 32 * channels");
+
+static bool trcm_txonly = true;
+module_param(trcm_txonly, bool, 0644);
+MODULE_PARM_DESC(trcm_txonly, "force dai_link->symmetric_rate (TRCM_TXONLY)");
+
 /* ------------------------------------------------------------------ */
 /* I2C 访问：与 vendor 完全一致 —— 一次 i2c_transfer 发 {reg, val} 两字节  */
 /* ------------------------------------------------------------------ */
@@ -116,15 +153,24 @@ static int adc_write(struct mid_audio *priv, int chip, u8 reg, u8 val)
 		.len	= 2,
 		.buf	= buf,
 	};
-	int ret;
+	int ret, tries;
 
-	ret = i2c_transfer(priv->adc[chip].adap, &msg, 1);
-	if (ret != 1) {
-		dev_err(priv->dev, "i2c write %02x:%02x=%02x failed (%d)\n",
-			priv->adc[chip].addr, reg, val, ret);
-		return ret < 0 ? ret : -EIO;
+	/*
+	 * ES7243 在没看到 MCLK 之前不应答 I2C（ESPHome 的 es7243 驱动里明确写了
+	 * "The chip ignores I2C until it has seen MCLK"）。MCLK 由本驱动在 probe
+	 * 时打开并常开，但如果时钟刚起或芯片刚从休眠醒来，第一次写仍可能 NAK，
+	 * 所以这里带重试。
+	 */
+	for (tries = 0; tries < 5; tries++) {
+		ret = i2c_transfer(priv->adc[chip].adap, &msg, 1);
+		if (ret == 1)
+			return 0;
+		usleep_range(2000, 3000);
 	}
-	return 0;
+
+	dev_err(priv->dev, "i2c write %02x:%02x=%02x failed (%d)\n",
+		priv->adc[chip].addr, reg, val, ret);
+	return ret < 0 ? ret : -EIO;
 }
 
 static int adc_read(struct mid_audio *priv, int chip, u8 reg, u8 *val)
@@ -174,19 +220,45 @@ static void adc_dump(struct mid_audio *priv, const char *tag)
 
 static int adc_init_one(struct mid_audio *priv, int c)
 {
+	if (seq_variant == 3)
+		return 0;
+
 	return adc_write(priv, c, 0x00, 0x01);
 }
 
 static int adc_start_one(struct mid_audio *priv, int c)
 {
-	int i, ret;
+	const u8 (*tbl)[2];
+	int n, i, ret;
 
-	for (i = 0; i < ARRAY_SIZE(es7243_start_seq); i++) {
-		u8 reg = es7243_start_seq[i][0];
-		u8 val = es7243_start_seq[i][1];
+	/*
+	 * seq_variant==2：实验模式。芯片上电默认值（实测读回）
+	 *   00=00 01=00 02=10 03=04 04=02 05=33 06=00 07=dc 08=11 09=00 0a=c0
+	 *   0b=c0 0c=12 0d=60 0e=40 0f=ff
+	 * 与 ES7243E 完全不同 ⇒ 原厂 11 写序列可能只适用于某种 MCLK/采样率。
+	 * 本模式只把 0x00 置 0x01（上电），其余全部保持默认，用于判断
+	 * 「芯片到底要不要额外配置」。
+	 */
+	if (seq_variant == 3)
+		return 0;	/* 完全不碰芯片，便于手工配寄存器做实验 */
 
-		if (i == ES7243_START_CASCADE_IDX &&
-		    priv->adc[c].addr == ES7243_SYNC_ADDR)
+	if (seq_variant == 2)
+		return adc_write(priv, c, 0x00, 0x01);
+
+	if (seq_variant == 1) {
+		tbl = es7243_start_seq_min;
+		n = ARRAY_SIZE(es7243_start_seq_min);
+	} else {
+		tbl = es7243_start_seq;
+		n = ARRAY_SIZE(es7243_start_seq);
+	}
+
+	for (i = 0; i < n; i++) {
+		u8 reg = tbl[i][0];
+		u8 val = tbl[i][1];
+
+		/* 级联差异点：0x12 芯片 reg 0x08 的增益值改成 0x21 */
+		if (reg == 0x08 && priv->adc[c].addr == ES7243_SYNC_ADDR)
 			val = 0x21;
 
 		ret = adc_write(priv, c, reg, val);
@@ -194,8 +266,8 @@ static int adc_start_one(struct mid_audio *priv, int c)
 			return ret;
 	}
 
-	/* 原厂驱动不写 0x0C（TDM_MODE/TDM_FLAG）；mainline 若要做 4ch TDM
-	 * 级联才需要补写，具体值由 module param 在板上试。 */
+	/* 原厂驱动不写 0x0C（ES7243E 的 TDM_MODE/TDM_FLAG）；mainline 若要做
+	 * 4ch TDM 级联才需要补写，具体值由 module param 在板上试。 */
 	if (priv->adc[c].addr == ES7243_SYNC_ADDR && tdm_sync >= 0)
 		return adc_write(priv, c, 0x0c, tdm_sync);
 	if (priv->adc[c].addr != ES7243_SYNC_ADDR && tdm_first >= 0)
@@ -206,6 +278,9 @@ static int adc_start_one(struct mid_audio *priv, int c)
 
 static int adc_standby_one(struct mid_audio *priv, int c)
 {
+	if (seq_variant == 2 || seq_variant == 3)
+		return 0;
+
 	int i, ret;
 
 	for (i = 0; i < ARRAY_SIZE(es7243_standby_seq); i++) {
@@ -223,6 +298,13 @@ static int adc_power_up(struct mid_audio *priv)
 
 	if (priv->adc_on)
 		return 0;
+
+	/* 芯片必须看到 MCLK 才应答 I2C：probe 里已常开，这里再兜一次底 */
+	if (priv->mclk_clk) {
+		clk_set_rate(priv->mclk_clk, priv->mclk ? priv->mclk : 12288000);
+		clk_prepare_enable(priv->mclk_clk);
+		usleep_range(20000, 25000);
+	}
 
 	for (c = 0; c < priv->num_adc; c++) {
 		ret = adc_init_one(priv, c);
@@ -301,6 +383,27 @@ static int mid_hw_params(struct snd_pcm_substream *substream,
 	if (substream->stream != SNDRV_PCM_STREAM_CAPTURE)
 		return 0;
 
+	/* rockchip_i2s 默认 bclk_ratio=64（2 槽 x 32bit），多声道会把帧截短，
+	 * 必须在 CPU DAI 的 hw_params 之前改成 32*channels（codec 侧先于 cpu 侧） */
+	if (auto_bclk_ratio) {
+		struct snd_soc_pcm_runtime *rtd =
+			snd_soc_substream_to_rtd(substream);
+		struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+
+		snd_soc_dai_set_bclk_ratio(cpu_dai, 32 * ch);
+		dev_info(dai->dev, "bclk_ratio -> %u\n", 32 * ch);
+	}
+
+	if (trcm_txonly) {
+		struct snd_soc_pcm_runtime *rtd =
+			snd_soc_substream_to_rtd(substream);
+
+		if (!rtd->dai_link->symmetric_rate) {
+			rtd->dai_link->symmetric_rate = 1;
+			dev_info(dai->dev, "forced dai_link->symmetric_rate (TRCM_TXONLY)\n");
+		}
+	}
+
 	/* 采集方向：此刻 SoC 侧时钟已按 hw_params 落频，正适合给 ADC 上电 */
 	return adc_power_up(priv);
 }
@@ -342,7 +445,7 @@ static struct snd_soc_dai_driver mid_dai = {
 	.capture = {
 		.stream_name	= "Capture",
 		.channels_min	= 1,
-		.channels_max	= 4,
+		.channels_max	= 8,
 		.rates		= SNDRV_PCM_RATE_8000_48000,
 		.formats	= SNDRV_PCM_FMTBIT_S16_LE |
 				  SNDRV_PCM_FMTBIT_S24_LE |
@@ -374,6 +477,7 @@ static int mid_audio_probe(struct platform_device *pdev)
 	/* 两颗 ADC 通过 everest,adc = <&es7243_0>, <&es7243_1> 指过来；
 	 * 我们自己从节点里取 i2c adapter + 地址，不依赖 i2c client 绑定。 */
 	for (i = 0; i < MID_ADC_MAX; i++) {
+		struct device_node *i2c_np;
 		u32 addr;
 
 		np = of_parse_phandle(dev->of_node, "everest,adc", i);
@@ -386,12 +490,17 @@ static int mid_audio_probe(struct platform_device *pdev)
 			return -EINVAL;
 		}
 
-		priv->adc[i].adap = of_get_i2c_adapter_by_node(np);
+		/* of_get_i2c_adapter_by_node() 要的是 i2c 控制器节点，
+		 * 不是从设备节点 ⇒ 取父节点。 */
+		i2c_np = of_get_parent(np);
+		priv->adc[i].adap = of_get_i2c_adapter_by_node(i2c_np);
 		priv->adc[i].addr = addr;
+		of_node_put(i2c_np);
 		of_node_put(np);
 
 		if (!priv->adc[i].adap) {
-			dev_err(dev, "adc[%d]: i2c adapter not found\n", i);
+			dev_err(dev, "adc[%d]@0x%02x: i2c adapter not found\n",
+				i, addr);
 			return -EPROBE_DEFER;
 		}
 		dev_info(dev, "adc[%d]: i2c-%d addr 0x%02x\n", i,
@@ -405,6 +514,38 @@ static int mid_audio_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, priv);
+
+	/*
+	 * 取 i2s0 的 MCLK（DTS: clocks = <&cru SCLK_I2S0>, clock-names="mclk"），
+	 * probe 时就打开并常开：ES7243 在没看到 MCLK 之前不应答 I2C，而 ASoC 的
+	 * hw_params 里 codec 先于 cpu dai 执行，此时 rockchip_i2s 的 runtime_resume
+	 * 未必已经 enable 自己的 mclk ⇒ 不常开就必然 -ENXIO。
+	 */
+	priv->mclk_clk = devm_clk_get(dev, "mclk");
+	if (IS_ERR(priv->mclk_clk)) {
+		ret = PTR_ERR(priv->mclk_clk);
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		dev_warn(dev, "no mclk clock (%d), ADC may not answer I2C\n", ret);
+		priv->mclk_clk = NULL;
+	} else {
+		/*
+		 * 只 prepare_enable 不够：clock 链上 parent 未定频时 rate=0，
+		 * 引脚上没有波形，芯片照样不应答 I2C（实测 probe 报
+		 * "mclk 0 Hz enabled" 时 i2cget 全部 NAK）。必须先落频到
+		 * 12.288 MHz（48k x 256fs）。
+		 */
+		ret = clk_set_rate(priv->mclk_clk, 12288000);
+		if (ret)
+			dev_warn(dev, "mclk set_rate failed: %d\n", ret);
+
+		ret = clk_prepare_enable(priv->mclk_clk);
+		if (ret)
+			dev_warn(dev, "mclk enable failed: %d\n", ret);
+		else
+			dev_info(dev, "mclk %u Hz enabled\n",
+				 clk_get_rate(priv->mclk_clk));
+	}
 
 	ret = devm_snd_soc_register_component(dev, &mid_component, &mid_dai, 1);
 	if (ret) {

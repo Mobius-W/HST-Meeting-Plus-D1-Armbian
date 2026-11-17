@@ -71,6 +71,25 @@ struct hr8833_cmd {
 #define HR8833_IOC_SLEEP	_IO(HR8833_IOC_MAGIC, 4)
 #define HR8833_IOC_GET_OCP	_IOR(HR8833_IOC_MAGIC, 5, int)
 
+/*
+ * 原厂 Android ioctl 兼容层（2026-11-16，内核 hr8833_ioctl 反汇编确认）。
+ * fsmeeting 的 libJniioctl.so 用 magic='m' 控制 /dev/hr8833。原厂驱动
+ * 只读 cmd、完全忽略 arg（无 copy_from_user/PWM/计时），三个分支是纯
+ * GPIO 写（AIN1/AIN2 raw value，满速无调速）：
+ *   0x18 Ioenable  -> AIN1=0, AIN2=0  停止/惰行（名字误导，实为 STOP）
+ *   0x19 Ioforward -> AIN1=0, AIN2=1  正转
+ *   0x1a Ioreverse -> AIN1=1, AIN2=0  反转
+ * App 侧 turnByAngle() 按 |angle| 毫秒延时后再发一次 0x18 停机（开环短脉冲）。
+ * nSLEEP 由 probe 置高一次，ioctl 不切；原厂未实现 OCP 检测。
+ *
+ * 本兼容层严格复刻原厂语义：不读 arg、不设自动停机、不切 nSLEEP，
+ * 直接写 AIN1/AIN2。保留自有 magic='H' 的 cmd 供本驱动高级用法。
+ */
+#define HR8833_VENDOR_MAGIC	'm'
+#define HR8833_VENDOR_IOC_ENABLE  _IOW(HR8833_VENDOR_MAGIC, 0x18, int)
+#define HR8833_VENDOR_IOC_FWD	  _IOW(HR8833_VENDOR_MAGIC, 0x19, int)
+#define HR8833_VENDOR_IOC_REV	  _IOW(HR8833_VENDOR_MAGIC, 0x1a, int)
+
 struct hr8833 {
 	struct device *dev;
 	struct miscdevice miscdev;
@@ -238,6 +257,36 @@ static int hr8833_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/*
+ * 原厂兼容：纯 GPIO 控制 H 桥（复刻 vendor hr8833_ioctl，满速无 PWM）。
+ * 调用者持 h->lock。先停掉本驱动的 hrtimer/stop_work 避免与软件 PWM 抢 GPIO，
+ * 唤醒 H 桥后按原厂极性直写 AIN1/AIN2；不设自动停机，由 App 侧再发 0x18 停。
+ */
+static void __hr8833_vendor_gpio(struct hr8833 *h, int ain1, int ain2)
+{
+	unsigned long flags;
+
+	/* 关掉软件 PWM，防止 hrtimer 回调覆盖我们直写的引脚 */
+	spin_lock_irqsave(&h->slock, flags);
+	h->running = false;
+	h->phase_on = false;
+	h->speed = 0;
+	spin_unlock_irqrestore(&h->slock, flags);
+	hrtimer_cancel(&h->pwm_timer);
+	cancel_delayed_work(&h->stop_work);
+
+	/* 原厂 probe 置 nSLEEP 高后不再动；这里保持 H 桥唤醒 */
+	if (h->sleep_state) {
+		gpiod_set_value(h->sleep, 0);	/* DTS ACTIVE_LOW：0=物理高=工作 */
+		h->sleep_state = false;
+		usleep_range(1000, 2000);
+	}
+
+	/* 原厂极性：forward=AIN2:1，reverse=AIN1:1，stop=两路 0（惰行） */
+	gpiod_set_value(h->ain1, ain1);
+	gpiod_set_value(h->ain2, ain2);
+}
+
 static long hr8833_ioctl(struct file *file, unsigned int cmd,
 			 unsigned long arg)
 {
@@ -272,6 +321,19 @@ static long hr8833_ioctl(struct file *file, unsigned int cmd,
 		ocp = gpiod_get_value(h->ocp) > 0 ? 1 : 0;
 		if (put_user(ocp, (int __user *)arg))
 			ret = -EFAULT;
+		break;
+	/* ---- 原厂 Android magic='m' 兼容（忽略 arg，纯 GPIO，极性对齐反汇编）---- */
+	case HR8833_VENDOR_IOC_ENABLE:
+		/* 0x18：AIN1=0, AIN2=0 停/惰行（名字误导，实际 STOP） */
+		__hr8833_vendor_gpio(h, 0, 0);
+		break;
+	case HR8833_VENDOR_IOC_FWD:
+		/* 0x19：AIN1=0, AIN2=1 正转（满速，App 侧定时发 0x18 停） */
+		__hr8833_vendor_gpio(h, 0, 1);
+		break;
+	case HR8833_VENDOR_IOC_REV:
+		/* 0x1a：AIN1=1, AIN2=0 反转 */
+		__hr8833_vendor_gpio(h, 1, 0);
 		break;
 	default:
 		ret = -ENOTTY;

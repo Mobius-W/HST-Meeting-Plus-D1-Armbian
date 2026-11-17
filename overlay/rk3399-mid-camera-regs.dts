@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * rk3399-mid 摄像头 raíl 补丁 overlay
+ *
+ * 背景：这块板的 sony,imx307 三路供电（AVDD/DOVDD/DVDD）是硬连的，
+ * vendor cam_board.xml 把它们标成 "NC"，DT 里没有任何 regulator 节点。
+ * 但 mainline v6.18 的 imx307 驱动用 devm_regulator_get_optional() 取这三路，
+ * 而该 API 在 DT 缺 supply 时返回的是 **ERR_PTR(-ENODEV)**（不是 NULL），
+ * 驱动把它当错误直接 return ⇒ probe 失败：
+ *     imx307 4-001a: error -ENODEV: Failed to get avdd regulator
+ *     imx307 4-001a: error -ENODEV: Failed to get power regulators
+ *
+ * 本 overlay 做两件事（都是这颗 sensor 在 mainline 下必需的）：
+ *
+ * ① 补三路 regulator-fixed（always-on，无实际控制），让寄存器获取成功；
+ *    enable/disable 是空操作，符合"硬连"现实。
+ *
+ * ② **纠正复位脚极性**。基础 DTS 里写的是
+ *      reset-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;
+ *    但实测（2026-11-17，sysfs 直接驱动 GPIO1_B0）：
+ *      - 物理驱动 **低** ⇒ i2c 立刻 ENXIO，sensor 完全不应答
+ *      - 物理驱动 **高** ⇒ 正常应答，chip id 0x301e = 0xb2
+ *    即"复位有效=低、正常工作=高"，DT 应声明 GPIO_ACTIVE_HIGH。
+ *    用 ACTIVE_LOW 时，驱动 __imx307_power_on() 末尾的
+ *    gpiod_set_value_cansleep(reset, 1) 会被翻译成物理**低**，
+ *    等于把芯片一直按在复位里 ⇒ probe 报
+ *      imx307 4-001a: Unexpected sensor id(000000), ret(-5)
+ *    （引脚在 probe 失败后被释放成输入，所以事后再手工读反而能读到 0xb2，
+ *      这个"驱动报错但手读正常"的怪现象就是这么来的。）
+ *
+ * 用法（板上）：
+ *   dtc -@ -I dts -O dtb -o /boot/overlay-user/rk3399-mid-camera-regs.dtbo \
+ *       rk3399-mid-camera-regs.dts
+ *   echo 'user_overlays=rk3399-mid-camera-regs' >> /boot/armbianEnv.txt
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			cam_avdd: regulator-cam-avdd {
+				compatible = "regulator-fixed";
+				regulator-name = "cam-avdd";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-always-on;
+			};
+
+			cam_dovdd: regulator-cam-dovdd {
+				compatible = "regulator-fixed";
+				regulator-name = "cam-dovdd";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+			};
+
+			cam_dvdd: regulator-cam-dvdd {
+				compatible = "regulator-fixed";
+				regulator-name = "cam-dvdd";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-always-on;
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&imx307>;
+		__overlay__ {
+			avdd-supply = <&cam_avdd>;
+			dovdd-supply = <&cam_dovdd>;
+			dvdd-supply = <&cam_dvdd>;
+			/* 复位有效=低，正常=高 ⇒ ACTIVE_HIGH(0)，见文件头 ② */
+			reset-gpios = <&gpio1 8 0>;
+		};
+	};
+};

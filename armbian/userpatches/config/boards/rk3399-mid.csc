@@ -69,20 +69,45 @@ source "${SRC}/config/sources/vendors/radxa/rk3399-uboot.conf.sh"
 # Armbian 官方 rockchip64 defconfig 默认不开 rkisp1，也不含本板移植的
 # imx307 驱动。用 custom_kernel_config hook 增量打开，避免整份 .config
 # 覆盖（那会让后续内核升级失去官方默认值）。
-# 依赖链大部分已在官方 config（MEDIA_PLATFORM_DRIVERS=y /
-# VIDEO_V4L2_SUBDEV_API=y / GENERIC_PHY_MIPI_DPHY=y / VIDEOBUF2_DMA_CONTIG=m），
-# 这里只补缺失的 ISP1、sensor、MIPI CSI-2 PHY 与 V4L2 core。
+# 依赖链：ISP1 在 6.18 的 Kconfig 是
+#   config VIDEO_ROCKCHIP_ISP1  tristate
+#       depends on V4L_PLATFORM_DRIVERS
+#       depends on VIDEO_DEV && OF
+#       depends on ARCH_ROCKCHIP || ARCH_MXC || COMPILE_TEST
+# ★ 2026-11-17 事故修正（核查 run 43993856054 产物的 .config 发现）：
+#   第一版只写了 CONFIG_VIDEO_ROCKCHIP_ISP1=y，结果 .config 里**根本没有这个符号**
+#   （既没有 =y，也没有 "# ... is not set"）。根因是
+#   `# CONFIG_V4L_PLATFORM_DRIVERS is not set` —— 依赖不满足时 Kconfig 让符号不可见，
+#   scripts/config 写进去的 =y 被随后的 olddefconfig 直接抹掉，连痕迹都不留。
+#   同时 VIDEO_DEV=m，ISP1 若要 =y 还得把 VIDEO_DEV 一并提到 y，污染面更大。
+# ★ 2026-11-17 二次事故修正（核查 run 44005709935 产物 .config 发现）：
+#   第二版把 CONFIG_V4L_PLATFORM_DRIVERS 塞进 opts_m，构建日志明确报警：
+#     .config:3571:warning: symbol value 'm' invalid for V4L_PLATFORM_DRIVERS
+#   查 v6.18 drivers/media/platform/Kconfig 确认它是 **bool**（不是 tristate），
+#   在 `if MEDIA_PLATFORM_DRIVERS` 里，只有 y/n 两态。写成 m ⇒ 被丢回 n ⇒
+#   ISP1 依赖仍不满足 ⇒ CONFIG_VIDEO_ROCKCHIP_ISP1 符号继续完全不存在，
+#   rockchip-isp1.ko 没编（日志里 grep 不到任何 rkisp1 的 CC/LD 行）。
+#   ⇒ 正确做法：**V4L_PLATFORM_DRIVERS 必须是 opts_y**；ISP1 本身是 tristate、
+#     且依赖 VIDEO_DEV(=m) ⇒ 只能 =m，留在 opts_m。
+#   （名字用 armbian 的扩展命名法 hook__扩展名，框架会自动合成 custom_kernel_config 包装器。）
 function custom_kernel_config__rk3399_mid_camera() {
 	opts_y+=(
-		CONFIG_VIDEO_ROCKCHIP_ISP1
+		# ISP1 的前置，**bool** 类型，只能 y/n。缺了它 ISP1 连符号都不出现。
+		# 前置链 MEDIA_PLATFORM_SUPPORT=y / MEDIA_PLATFORM_DRIVERS=y 官方 config 已有。
+		CONFIG_V4L_PLATFORM_DRIVERS
+		# 同样是 bool（run 44017787539 日志：warning: symbol value 'm' invalid for
+		# VIDEO_V4L2_I2C）。它本来默认就是 y，写进 opts_m 只是刷 warning，这里纠正归类。
+		CONFIG_VIDEO_V4L2_I2C
 	)
 	opts_m+=(
+		# tristate，depends on VIDEO_DEV(=m) ⇒ 只能 m
+		CONFIG_VIDEO_ROCKCHIP_ISP1
+		# sensor
 		CONFIG_VIDEO_IMX307
-		CONFIG_VIDEO_V4L2
-		CONFIG_VIDEO_V4L2_I2C
 		CONFIG_V4L2_ASYNC
 		CONFIG_V4L2_CCI_I2C
 		CONFIG_REGMAP_I2C
+		# MIPI CSI-2 PHY
 		CONFIG_PHY_ROCKCHIP_INNO_CSIDPHY
 		CONFIG_PHY_ROCKCHIP_DPHY_RX0
 	)

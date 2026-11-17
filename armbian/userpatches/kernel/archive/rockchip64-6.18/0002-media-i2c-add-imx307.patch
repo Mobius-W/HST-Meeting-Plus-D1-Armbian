@@ -2,7 +2,7 @@ diff --git a/drivers/media/i2c/imx307.c b/drivers/media/i2c/imx307.c
 new file mode 100644
 --- /dev/null
 +++ b/drivers/media/i2c/imx307.c
-@@ -0,0 +1,1054 @@
+@@ -0,0 +1,1068 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Sony IMX307 CMOS Image Sensor Driver
@@ -608,6 +608,13 @@ new file mode 100644
 +	delay_us = imx307_cal_delay(8192);
 +	usleep_range(delay_us, delay_us * 2);
 +
++	/* Volatile sensor: BSP rewrites init table on EVERY power-up */
++	ret = imx307_write_array(imx307->client, imx307_global_regs);
++	if (ret) {
++		dev_err(dev, "could not set init registers\n");
++		goto disable_clk;
++	}
++
 +	return 0;
 +
 +disable_clk:
@@ -887,6 +894,18 @@ new file mode 100644
 +						    imx307_supply_names[i]);
 +		if (IS_ERR(imx307->supplies[i].consumer)) {
 +			ret = PTR_ERR(imx307->supplies[i].consumer);
++			/*
++			 * devm_regulator_get_optional() 在 DT 没有 supply 属性时
++			 * 返回的是 ERR_PTR(-ENODEV)，**不是 NULL**。本板三路 rail
++			 * 硬连、DT 里不声明，所以 -ENODEV 必须当"该 rail 不存在"
++			 * 处理，否则 probe 直接失败（2026-11-17 实测）：
++			 *   imx307 4-001a: error -ENODEV: Failed to get avdd regulator
++			 *   imx307 4-001a: error -ENODEV: Failed to get power regulators
++			 */
++			if (ret == -ENODEV) {
++				imx307->supplies[i].consumer = NULL;
++				continue;
++			}
 +			return dev_err_probe(&imx307->client->dev, ret,
 +					     "Failed to get %s regulator\n",
 +					     imx307_supply_names[i]);
@@ -949,12 +968,7 @@ new file mode 100644
 +	if (ret)
 +		goto err_power_off;
 +
-+	ret = imx307_write_array(client, imx307_global_regs);
-+	if (ret) {
-+		dev_err(dev, "could not set init registers\n");
-+		goto err_power_off;
-+	}
-+
++	/* init table is written by __imx307_power_on() on every power-up */
 +	sd = &imx307->subdev;
 +	v4l2_i2c_subdev_init(sd, client, &imx307_subdev_ops);
 +
@@ -988,7 +1002,7 @@ new file mode 100644
 +	pm_runtime_enable(dev);
 +	pm_runtime_idle(dev);
 +
-+	ret = v4l2_async_register_subdev(sd);
++	ret = v4l2_async_register_subdev_sensor(sd);
 +	if (ret) {
 +		dev_err(dev, "v4l2 async register subdev failed\n");
 +		pm_runtime_disable(dev);
