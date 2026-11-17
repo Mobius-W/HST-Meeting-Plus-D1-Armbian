@@ -602,6 +602,20 @@
 				<2 RK_PA5 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
+
+	/*
+	 * 摄像头 MCLK：GPIO2_B3 func3 = CIF_CLKOUT。
+	 * 依据 vendor DTS 的 cif-clkout 组（<0x02 0x0b 0x03 0xbc>，作 ISP pinctrl-0）
+	 * 与 cam_board.xml 的 SensorMclk=37125000。
+	 * ★ 2026-11-17 实测教训：mainline rkisp1 不带这个 pinctrl，脚一直 UNCLAIMED，
+	 *   clk_cifout 停在默认 6 MHz 无 consumer ⇒ sensor 拿不到 INCK，
+	 *   写 0x3000=STREAMING 后会自己退回 STANDBY，MIPI 无数据。
+	 */
+	camera {
+		cif_clkout: cif-clkout {
+			rockchip,pins = <2 RK_PB3 3 &pcfg_pull_none>;
+		};
+	};
 };
 
 /* ---------------- UART0：AP6255 蓝牙（BCM4345C0） ---------------- */
@@ -781,33 +795,32 @@
 	status = "okay";
 };
 
-/* ---------------- 摄像头：Sony IMX307 + rkisp1（2026-11-16）-------------
+/* ---------------- 摄像头：Sony IMX307 + rkisp1（2026-11-16，11-17 修正）-----
  * 型号依据：原厂 /etc/cam_board.xml + IMX307_CMK-OT0712-FV2.xml +
  *   libisp_isi_drv_IMX307.so + 实机 CHIP_ID@0x301e=0xb2（四重证据）。
  * 硬件：i2c4 @0x1a，MIPI CSI-2 2-lane 到 ISP0，供电板上常开（vendor
  *   cam_board.xml 把 AVDD/DOVDD/DVDD 全标 NC）⇒ 不声明 *-supply，
- *   imx307.c 用 devm_regulator_get_optional 容忍缺 regulator。
- * 唤醒：复位脚 GPIO1_B0（原厂 RK30_PIN1_PB0, active=0），实测拉高后
- *   sensor 即在 0x1a 应答。xvclk 用 fixed-clock 37.125MHz，避免改动
- *   SoC cif 时钟树（原厂 MCLK 可能模组自带，实测不给 MCLK 也能 I2C）。
+ *   imx307.c 对 devm_regulator_get_optional() 的 -ENODEV 视为"无此 raíl"。
+ * 复位：GPIO1_B0（cam_board.xml: RK30_PIN1_PB0）。
+ *   ★ 2026-11-17 实测：物理拉低 ⇒ i2c 立刻 ENXIO；拉高 ⇒ 正常应答。
+ *   即复位有效=低、工作=高 ⇒ 必须 GPIO_ACTIVE_HIGH。
+ *   之前写 ACTIVE_LOW，驱动 __imx307_power_on() 末尾 set(1) 被翻译成物理低，
+ *   芯片被一直按在复位里，probe 报 "Unexpected sensor id(000000), ret(-5)"。
+ * MCLK：GPIO2_B3 func3 = CIF_CLKOUT，37.125 MHz（cam_board.xml SensorMclk）。
+ *   ★ 之前用 fixed-clock 占位是错的：那只骗过驱动，脚上并没有波形。
  */
-&{/} {
-	cam_xvclk: cam-xvclk {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <37125000>;
-		clock-output-names = "cam-xvclk";
-	};
-};
-
 &i2c4 {
 	imx307: camera@1a {
 		compatible = "sony,imx307";
 		reg = <0x1a>;
-		clocks = <&cam_xvclk>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cif_clkout>;
+		clocks = <&cru SCLK_CIF_OUT>;
 		clock-names = "xvclk";
-		reset-gpios = <&gpio1 8 GPIO_ACTIVE_LOW>;   /* GPIO1_B0 */
-		/* PWDN 由板上常开，不声明 pwdn-gpios */
+		assigned-clocks = <&cru SCLK_CIF_OUT>;
+		assigned-clock-rates = <37125000>;
+		reset-gpios = <&gpio1 8 GPIO_ACTIVE_HIGH>;   /* GPIO1_B0 */
+		/* PWDN1 = GPIO1_B1 板上常开，不声明 pwdn-gpios */
 
 		port {
 			imx307_out: endpoint {
