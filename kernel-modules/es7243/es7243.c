@@ -171,8 +171,6 @@ static int adc_write(struct mid_audio *priv, int chip, u8 reg, u8 val)
 	dev_err(priv->dev, "i2c write %02x:%02x=%02x failed (%d)\n",
 		priv->adc[chip].addr, reg, val, ret);
 	return ret < 0 ? ret : -EIO;
-	}
-	return 0;
 }
 
 static int adc_read(struct mid_audio *priv, int chip, u8 reg, u8 *val)
