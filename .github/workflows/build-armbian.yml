@@ -86,6 +86,34 @@ jobs:
           sudo ./compile.sh requirements
           sudo chown -R "$USER:$USER" .
 
+      # ---------- 3.5 构建前 patch 预检（早失败，别等 8 分钟编译） ----------
+      # 用与构建完全相同的内核版本，在最小源码树上按序号 git apply 所有
+      # userpatches kernel/archive patch。任一 patch 失配立即失败，避免像
+      # 2026-11-17 那样：两个驱动 patch 抢同一 Makefile 位置、顺序应用第二个
+      # hunk 失配，直到 compile.sh 打补丁阶段（第 8 分钟）才暴露。
+      - name: Preflight - verify kernel patches apply in order
+        run: |
+          set -euo pipefail
+          KVER=6.18.63
+          TREE="$RUNNER_TEMP/kpreflight"
+          mkdir -p "$TREE/drivers/misc" "$TREE/drivers/media/i2c"
+          BASE="https://raw.githubusercontent.com/gregkh/linux/v${KVER}"
+          curl -fsSL "$BASE/drivers/misc/Makefile"        -o "$TREE/drivers/misc/Makefile"
+          curl -fsSL "$BASE/drivers/misc/Kconfig"         -o "$TREE/drivers/misc/Kconfig"
+          curl -fsSL "$BASE/drivers/media/i2c/Makefile"   -o "$TREE/drivers/media/i2c/Makefile"
+          curl -fsSL "$BASE/drivers/media/i2c/Kconfig"    -o "$TREE/drivers/media/i2c/Kconfig"
+          git -C "$TREE" init -q
+          git -C "$TREE" add -A
+          git -C "$TREE" -c user.email=a@b -c user.name=ci commit -qm base
+          echo "=== applying userpatches SEQUENTIALLY onto linux v${KVER} ==="
+          # 必须逐个真正 apply（累积到工作树），不能用 --check 逐个独立检查：
+          # 历史 bug 正是"单独 apply 都 OK、顺序 apply 第二个 Makefile hunk 失配"。
+          for p in build/userpatches/kernel/archive/rockchip64-6.18/*.patch; do
+            echo "--- $(basename "$p")"
+            git -C "$TREE" apply "$GITHUB_WORKSPACE/$p"
+          done
+          echo "All kernel userpatches applied cleanly, in order."
+
       # ---------- 4. 编译 ----------
       - name: Build Armbian image
         run: |
@@ -97,6 +125,7 @@ jobs:
             RELEASE="${{ inputs.release || 'noble' }}" \
             BUILD_DESKTOP="${{ inputs.desktop && 'yes' || 'no' }}" \
             BUILD_MINIMAL="${{ inputs.desktop && 'no' || 'yes' }}" \
+            KERNELBRANCH=tag:v6.18.63 \
             KERNEL_CONFIGURE=no \
             COMPRESS_OUTPUTIMAGE=img \
             SHARE_LOG=yes \

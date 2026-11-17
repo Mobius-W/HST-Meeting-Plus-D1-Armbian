@@ -114,6 +114,38 @@ CONFIG_ROCKCHIP_RK3399=y
 已存在）显式 `--enable CONFIG_LMB` + `CONFIG_CMD_BOOTI`，并防御性补齐 FS/PART/MMC/GPT。
 **不能用 `pre_config_uboot_target`** —— 它在 `make defconfig` 之前，`.config` 还不存在。
 
+### 3.5 内核 userpatch 顺序应用冲突 + 内核版本滚动（2026-11-17 run #44079575914 失败根因）
+
+**现象**：`Failed to apply 3 patches`（compile.sh 的 kernel patching 阶段，第 8 分钟才暴露）：
+`0001-misc-add-es7243`、`0003-misc-add-hr8833`（我们的）+ `general-can-3-dev-can_put_echo_skb`（armian 官方）。
+
+**两个独立根因**：
+
+1. **我们的 patch 顺序冲突（主因，可完全本地复现）**：
+   0001 和 0003 各自把一条 `obj-m += …` 追加到 `drivers/misc/Makefile` **尾部 `@@ -75,3`**。
+   - 单独对干净源码 `git apply --check`：**两个都 OK**（这就是之前 dry-run "OK" 的假象）；
+   - 按序号**顺序 apply**：0001 先在尾部加了 3 行，0003 的 `@@ -75` 上下文随即失效 →
+     `error: patch failed: drivers/misc/Makefile:75`。
+   - 附带：新文件 patch 带 `index 0000..0000` 全零行，被 patch 工具判成 reverse 而跳过文件创建。
+   - **修复**：两个驱动合并成**一个** patch `0001-misc-add-rk3399-drivers.patch`，Makefile 只改一次；
+     去掉全零 index 行（仿成功的 0002）；锚点从尾部 `@@ -75` 改为**头部 `@@ -1,4`**（SPDX 注释块，
+     在 6.18.63/64 逐字节一致）。生成脚本 `tools/mk-board-drivers-patch.py`。
+
+2. **armian 官方 patch 与滚动内核冲突**：
+   workflow 原本 `KERNELBRANCH` 未 pin，armian 默认 `branch:linux-6.18.y` 滚动。
+   成功 run #44055636949 = 6.18.63（1cdda838），失败 run = 6.18.64（fd7cfd39）；
+   6.18.64 主线吸收了 CAN 的 `dev_kfree_skb_any(skb)` 修复 → armian 的 `general-can-3` patch
+   变成 `Reversed (or previously applied)` → patching.py 计入 failed → 整体失败。
+   patching_config.yaml **没有排除单个 patch 的机制**，无法在 userpatches 里删掉官方 patch。
+   **修复**：compile.sh 显式 `KERNELBRANCH=tag:v6.18.63` pin 到已知全绿的版本（可复现）。
+
+**编译前确认（防复发）**：
+- 本地：`tools/preflight-build.sh` —— 检查 workflow 已 pin 内核版本，拉该版本内核的 patch 目标文件，
+  在临时 git 树上**顺序 apply 所有 userpatches**，任一失配即非零退出、禁止 push。
+  已做正例（PASS）与反例（恢复旧 0001/0003 → 准确拦截 FAIL）双测。
+- CI：workflow 新增 `Preflight - verify kernel patches apply in order` 步骤，同样逻辑搬到云上，
+  patch 失配立即失败，不必等第 8 分钟的编译。
+
 ---
 
 ## 四、引导路径（v2026.10 走 BOOTSTD，不走 distro_bootcmd）
@@ -199,10 +231,11 @@ CI 第 6 步会自动产出 `*-parm.img` 并回读校验（PARM 长度、MBR slo
 | 1-3 | checkout | 本仓库 → `custom/`；`armbian/build@main` → `build/`；`armbian/os` → `os/` |
 | 4 | Prepare userpatches | `rsync os/userpatches` + `rsync custom/armbian/userpatches` |
 | 5 | Install build requirements | `sudo ./compile.sh requirements` + `chown`（**build 本身不能用 root 跑**，`compile.sh` 会自动 relaunch 进 `ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest`） |
-| 6 | Build | `./compile.sh build BOARD=rk3399-mid BRANCH=current RELEASE=noble BUILD_MINIMAL=yes KERNEL_CONFIGURE=no COMPRESS_OUTPUTIMAGE=img` |
-| 7 | Verify | 解 `linux-u-boot-rk3399-mid-*.deb` 看 `uboot.img`/`trust.bin` 魔数；回读镜像 LBA0/1/64/8192/16384/24576/32768 |
-| 8 | PARM variant | 生成并校验 `-parm.img`（失败不阻断主产物） |
-| 9 | Collect + upload | 镜像、deb、`boot-uboot.img`/`boot-trust.bin`、`rk3399-mid.dtb` |
+| 6 | **Preflight（2026-11-17 新增）** | 拉 `KERNELBRANCH` pin 版本内核的 patch 目标文件，临时 git 树上**顺序 apply 所有 kernel userpatch**；失配立即失败，不等编译（§3.5） |
+| 7 | Build | `./compile.sh build BOARD=rk3399-mid BRANCH=current RELEASE=noble KERNELBRANCH=tag:v6.18.63 BUILD_MINIMAL=yes KERNEL_CONFIGURE=no COMPRESS_OUTPUTIMAGE=img` —— **KERNELBRANCH 必须 pin**，否则滚动分支会让 armian 官方 patch reversed（§3.5） |
+| 8 | Verify | 解 `linux-u-boot-rk3399-mid-*.deb` 看 `uboot.img`/`trust.bin` 魔数；回读镜像 LBA0/1/64/8192/16384/24576/32768 |
+| 9 | PARM variant | 生成并校验 `-parm.img`（失败不阻断主产物） |
+| 10 | Collect + upload | 镜像、deb、`boot-uboot.img`/`boot-trust.bin`、`rk3399-mid.dtb` |
 
 ---
 
@@ -212,6 +245,9 @@ CI 第 6 步会自动产出 `*-parm.img` 并回读校验（PARM 长度、MBR slo
 |---|---|---|---|
 | #43005314503 | 1c8949c | ❌ | `trust.ini` 缺失（§3.2）——U-Boot 本体 37 s 成功，仅 `trust_merger` 失败 |
 | #43009803786 | 48ca8ec | ✅ **成功** | 补 `add-trust-ini.patch` + 去掉 `DEFAULT_FDT_FILE` 覆写；11:11→13:04，约 113 min |
+| #44055636949 | 19bb039 | ✅ **成功** | camera kconfig 修复（远端 camera 线终点），内核 6.18.63 |
+| #44079575914 | 74a5a95 | ❌ | 3 patch 应用失败（§3.5）：0001/0003 Makefile 顺序冲突 + 6.18.64 滚动导致 armian `general-can-3` reversed |
+| （修复后待触发）| 待填 | — | 合并 0001+0003 为单个 patch + 头部锚点；pin `KERNELBRANCH=tag:v6.18.63`；新增本地+CI 双层 preflight |
 
 ## 八之二、成功构建的产物实证（run #43009803786）
 
