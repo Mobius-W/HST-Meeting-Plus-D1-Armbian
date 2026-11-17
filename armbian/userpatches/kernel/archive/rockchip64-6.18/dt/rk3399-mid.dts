@@ -183,6 +183,33 @@
 		#sound-dai-cells = <0>;
 	};
 
+	/*
+	 * 复合 codec：mainline 版的「vendor es8316」
+	 *
+	 * 原厂结构是 es8316 codec 驱动统管播放(ES7148)与采集(2x ES7243)，
+	 * 两颗 ES7243 只是裸 i2c client，不在任何 sound card 里；4 麦数据从
+	 * i2s0 的 capture 通路进系统（原厂 es8316_pcm_startup -> es7243_start）。
+	 *
+	 * mainline 的 simple-audio-card 一个 dai_link 只能挂一个 codec DAI，
+	 * 要播放与采集共用 i2s0，就必须由一个 DAI 同时提供两个方向
+	 * ⇒ 本节点对应的驱动（kernel-modules/es7243/es7243.c）同时提供
+	 *   playback（ES7148 直通）与 capture（4ch，内含 ES7243 上电时序）。
+	 */
+	mic_array: mic-array {
+		compatible = "rockchip,rk3399-mid-audio";
+		#sound-dai-cells = <0>;
+		/*
+		 * ES7243 在没有 MCLK 之前不应答 I2C（厂商 ESPHome/ESP-ADF 驱动
+		 * 里明确写了这点）。由本驱动 probe 时打开并常开，不依赖
+		 * rockchip_i2s 的 runtime_resume —— ASoC 里 codec 的 hw_params
+		 * 先于 cpu dai 执行，那时 i2s 的 mclk 还没 enable。
+		 */
+		clocks = <&cru SCLK_I2S0_8CH>;
+		clock-names = "mclk";
+		everest,adc = <&es7243_0>, <&es7243_1>;
+		status = "okay";
+	};
+
 	es7148_sound: es7148-sound {
 		compatible = "simple-audio-card";
 		simple-audio-card,name = "rk3399-mid-es7148";
@@ -204,7 +231,12 @@
 		};
 
 		simple-audio-card,codec {
-			sound-dai = <&es7148>;
+			/*
+			 * 注意：不再是 &es7148（es7134 占位），而是能同时给
+			 * playback + capture 的复合 codec —— 否则 card 0 根本
+			 * 不会有 capture PCM（arecord -l 里看不到）。
+			 */
+			sound-dai = <&mic_array>;
 		};
 	};
 
