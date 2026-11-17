@@ -228,6 +228,17 @@ static int adc_start_one(struct mid_audio *priv, int c)
 	const u8 (*tbl)[2];
 	int n, i, ret;
 
+	/*
+	 * seq_variant==2：实验模式。芯片上电默认值（实测读回）
+	 *   00=00 01=00 02=10 03=04 04=02 05=33 06=00 07=dc 08=11 09=00 0a=c0
+	 *   0b=c0 0c=12 0d=60 0e=40 0f=ff
+	 * 与 ES7243E 完全不同 ⇒ 原厂 11 写序列可能只适用于某种 MCLK/采样率。
+	 * 本模式只把 0x00 置 0x01（上电），其余全部保持默认，用于判断
+	 * 「芯片到底要不要额外配置」。
+	 */
+	if (seq_variant == 2)
+		return adc_write(priv, c, 0x00, 0x01);
+
 	if (seq_variant == 1) {
 		tbl = es7243_start_seq_min;
 		n = ARRAY_SIZE(es7243_start_seq_min);
@@ -261,6 +272,9 @@ static int adc_start_one(struct mid_audio *priv, int c)
 
 static int adc_standby_one(struct mid_audio *priv, int c)
 {
+	if (seq_variant == 2)
+		return 0;
+
 	int i, ret;
 
 	for (i = 0; i < ARRAY_SIZE(es7243_standby_seq); i++) {
