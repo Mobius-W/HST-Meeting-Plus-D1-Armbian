@@ -1000,7 +1000,7 @@ new file mode 100644
 +	pm_runtime_enable(dev);
 +	pm_runtime_idle(dev);
 +
-+	ret = v4l2_async_register_subdev(sd);
++	ret = v4l2_async_register_subdev_sensor(sd);
 +	if (ret) {
 +		dev_err(dev, "v4l2 async register subdev failed\n");
 +		pm_runtime_disable(dev);
