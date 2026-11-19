@@ -4,6 +4,10 @@ RK3399 MID 板（Rockchip Sapphire + Excavator 参考设计的定制会议平板
 
 用 GitHub Actions 云端编译，本机不需要交叉工具链。
 
+> **📚 新来的请先读**：[`docs/文档导航-从取证弯路到最终结论.md`](docs/文档导航-从取证弯路到最终结论.md) —— 给出正确阅读顺序，标注哪些取证过程的结论已作废（尤其音频/麦阵线弯路最多）。
+> 权威一手资料（芯片手册 / LED 绑定表 / 硬件原始事实）在 [`docs/开发资料/README.md`](docs/开发资料/README.md)。
+> 判板子现状看 [`docs/硬件清单-驱动状态-20261116.md`](docs/硬件清单-驱动状态-20261116.md) §L。
+
 ## 硬件一句话
 
 RK3399 / **4 GB LPDDR4（2ch×2048MB，416→856 MHz）** / 8GB eMMC（DG4008）/ eDP 1920×1080 / GT9xx 触摸 / ES8316 + 2×ES7243（麦阵）+ 3×SN3732A（**LED 灯控，不是功放**）/ 无 I2C 的模拟输入 Class-D 功放（spk-con + amp-en 控制）/ HR8833 云台 / AP6255 WiFi+BT / 千兆 RGMII / 2S 8.4V 电池 / 双 ISP / 无 SD 卡槽 / UART2 调试口。

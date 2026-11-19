@@ -203,8 +203,18 @@
 		 * 里明确写了这点）。由本驱动 probe 时打开并常开，不依赖
 		 * rockchip_i2s 的 runtime_resume —— ASoC 里 codec 的 hw_params
 		 * 先于 cpu dai 执行，那时 i2s 的 mclk 还没 enable。
+		 *
+		 * ★ 2026-11-19 修正：必须用 SCLK_I2S_8CH_OUT（89 = 0x59，
+		 * clk_i2sout）而不是 SCLK_I2S0_8CH（86 = 0x56，clk_i2s0）。
+		 * 两者虽然都是 12.288 MHz，但只有 0x59 会经 i2s0_8ch_bus 里的
+		 * GPIO4_A0(func1) 输出到 ES7243 的 pin20 MCLK；0x56 只是 I2S0
+		 * 控制器内部时钟，不上 MCLK 脚。vendor 原厂 es8316@11 用的就是
+		 * clocks=<&cru 0x59> + i2s-8ch-mclk(GPIO4_A0) 这一路。
+		 * 板上实测（11-19）：clk_i2s0=12.288M/Y，而 clk_i2sout
+		 * prepare=0 enable=0 state=N ⇒ MCLK 脚从未有波形，这才是
+		 * i2c-1 上两颗 ES7243 同时无应答的根因。
 		 */
-		clocks = <&cru SCLK_I2S0_8CH>;
+		clocks = <&cru SCLK_I2S_8CH_OUT>;
 		clock-names = "mclk";
 		everest,adc = <&es7243_0>, <&es7243_1>;
 		status = "okay";

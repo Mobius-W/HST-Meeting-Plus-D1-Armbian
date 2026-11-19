@@ -51,7 +51,7 @@ def add_phandle(text, node_header, phandle):
 def main(src, dst):
     text = open(src).read()
 
-    # cru（clock-controller@ff760000）的 phandle，mic-array 要用它引用 SCLK_I2S0_8CH
+    # cru（clock-controller@ff760000）的 phandle，mic-array 要用它引用 SCLK_I2S_8CH_OUT
     mc = re.search(r'clock-controller@ff760000 \{[^}]*?phandle = <(0x[0-9a-f]+)>;',
                    text, re.S)
     if not mc:
@@ -68,11 +68,11 @@ def main(src, dst):
             open(dst, 'w').write(text)
             print('already patched (mic-array with clocks), copied as-is')
             return
-        ins = (f'\n\t\tclocks = <{ph_cru} 0x56>;\t/* SCLK_I2S0_8CH = 86 */'
+        ins = (f'\n\t\tclocks = <{ph_cru} 0x59>;\t/* SCLK_I2S_8CH_OUT = 89 */'
                f'\n\t\tclock-names = "mclk";')
         text = text[:brace + 1] + ins + text[brace + 1:]
         open(dst, 'w').write(text)
-        print(f'added clocks=<{ph_cru} 0x56> to existing mic-array')
+        print(f'added clocks=<{ph_cru} 0x59> to existing mic-array')
         return
 
     text = add_phandle(text, 'es7243@12 {', PH_ADC12)
@@ -86,7 +86,7 @@ def main(src, dst):
     old = m.group(1)
     text = text[:m.start(1)] + f'0x{PH_MIC:x}' + text[m.end(1):]
 
-    # cru（clock-controller@ff760000）的 phandle，mic-array 要用它引用 SCLK_I2S0_8CH
+    # cru（clock-controller@ff760000）的 phandle，mic-array 要用它引用 SCLK_I2S_8CH_OUT
     mc = re.search(r'clock-controller@ff760000 \{[^}]*?phandle = <(0x[0-9a-f]+)>;',
                    text, re.S)
     if not mc:
@@ -104,7 +104,7 @@ def main(src, dst):
 	mic-array {{
 		compatible = "rockchip,rk3399-mid-audio";
 		#sound-dai-cells = <0x00>;
-		clocks = <{ph_cru} 0x56>;	/* SCLK_I2S0_8CH = 86 */
+		clocks = <{ph_cru} 0x59>;	/* SCLK_I2S_8CH_OUT = 89 */
 		clock-names = "mclk";
 		everest,adc = <0x{PH_ADC10:x} 0x{PH_ADC12:x}>;
 		status = "okay";
