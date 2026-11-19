@@ -12,6 +12,8 @@
 | `ES7243E-Datasheet-Rev20.pdf` | **ES7243E** datasheet（E 版）。⚠ 本板实装是**非 E 版 ES7243**（0x00–0x0E 共 16 寄存器），此件仅供参考，寄存器值不可直接照抄 | ★ 官方 / 注意版本差异 |
 | `ES7243-ProductBrief-Rev13.pdf` | **ES7243** Product Brief（非 E 版）。Rev13.0 / 2021-02-02 / 11 页。关键：I2C 地址 `0010 0 AD1 AD0`（0x10–0x13）、**pin1 VDDP 是数字 IO/I2C 独立供电域**、MCLK 先决条件。**全文无寄存器映射表** | ★ 官方 / 破案关键线索 |
 | `IS31FL3732A-Datasheet-RevD.pdf` | **IS31FL3732A**（= SN3732A）LED 驱动，Rev.D / 820 KB。144 通道/片，板上 3 片 @ i2c6 `0x50/0x52/0x53`。寄存器全表、PWM 映射 | ★ 官方 datasheet |
+| `HR8833-Datasheet-V21.pdf` | **HR8833** 双通道 H 桥电机驱动（云台）。Rev2.1 / 2016-01 / 4 页，嘉兴禾润官网 `heroic.com.cn`（2026-11-19 下载）。关键：TSSOP-16，**pin-to-pin 兼容 TI DRV8833**；VM 2.7–12.8 V；nSLEEP=1 使能/0 睡眠（内部下拉）；nFAULT 开漏低=故障；**AISEN/BISEN 为电流检测/接地脚**——datasheet 明确"不用电流控制时接 GND"，是排查云台"xISEN 悬空"疑点的权威依据 | ★ 官方 datasheet |
+| `HT4832-Datasheet-V13.pdf` | **HT4832** 立体声耳机功放（板上 3.5 mm 耳机口）。V1.3 / 2023-03 / 4 页，嘉兴禾润官网（2026-11-19 下载）。关键：QFN-16 3×3、2.5–5.2 V、33 mW@32 Ω、免输出隔直电容、G0/G1(pin6/7) 增益 −6/0/3/6 dB、**EN=pin13 低关断**、**纯模拟无 I2C/无寄存器**——确认耳机功放不构成软件缺口，只能量 EN/听耳机口 | ★ 官方 datasheet |
 | `ES7148-元件辨认-20261116.jpg`、`ES7148-测点-20261116.jpg` | 板上 ES7148 实物丝印辨认 + 测点照片（肉眼/万用表定位用） | 实测照片 |
 
 ## 二、LED 灯控（`LED灯控/`）
