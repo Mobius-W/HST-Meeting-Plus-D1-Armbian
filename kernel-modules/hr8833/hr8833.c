@@ -86,6 +86,17 @@
 /* 故障复位后再次检查前的等待（等 nFAULT 上拉恢复） */
 #define HR8833_FAULT_SETTLE_US	300
 
+/*
+ * 默认不自动复位 nSLEEP。
+ *
+ * 原因（2026-11-19 实测教训）：自动复位会在 start 前切一次 nSLEEP，
+ * 芯片一下电 nFAULT 就被释放，于是「step 之间到底有没有恢复」这个
+ * 关键判据被驱动自己改写掉了。观测故障时必须是纯直驱。
+ */
+static bool auto_reset;
+module_param(auto_reset, bool, 0644);
+MODULE_PARM_DESC(auto_reset, "Cycle nSLEEP when nFAULT is low before start (default 0 = pure direct drive)");
+
 struct hr8833_cmd {
 	__s32 speed;	/* 负 = 反转，正 = 正转，0 = 停止 */
 	__u32 ms;	/* >0：运行 ms 毫秒后自动停机；0 = 一直转 */
@@ -225,8 +236,8 @@ static int __hr8833_start(struct hr8833 *h, int speed, unsigned int ms)
 
 	hr8833_wake(h);
 
-	/* 启动前若已处于故障态，先尝试复位 */
-	if (gpiod_get_value(h->ocp) > 0) {
+	/* 启动前若已处于故障态且开启了 auto_reset，才尝试复位 */
+	if (auto_reset && gpiod_get_value(h->ocp) > 0) {
 		int ret = hr8833_fault_reset(h);
 
 		if (ret)
@@ -323,15 +334,20 @@ static int __hr8833_vendor_gpio(struct hr8833 *h, int ain1, int ain2)
 	h->speed = 0;
 	cancel_delayed_work(&h->stop_work);
 
+	/*
+	 * 0x18：vendor 语义 = 只把 AIN1/AIN2 拉低（惰行 / coast），
+	 * **不切 nSLEEP**。原厂 ioctl 从不控制 nSLEEP，芯片保持唤醒。
+	 * 这里的差别直接决定观测结果：若在此处切 nSLEEP，芯片下电后
+	 * nFAULT 会被释放，看起来就像「故障消失」，会掩盖真实故障。
+	 */
 	if (ain1 == 0 && ain2 == 0) {
-		/* 0x18：stop → 惰行后休眠 */
-		hr8833_sleep(h);
+		hr8833_pins_idle(h);
 		return 0;
 	}
 
 	hr8833_wake(h);
 
-	if (gpiod_get_value(h->ocp) > 0) {
+	if (auto_reset && gpiod_get_value(h->ocp) > 0) {
 		int ret = hr8833_fault_reset(h);
 
 		if (ret)
