@@ -1,0 +1,8 @@
+### rkbin HEAD: 3e288fe
+### 2026-10-09T03:38:55Z
+--- component inputs ---
+2c74f7c0a2f7b1a49225fd0dca2fd88f574177e2b87dd4c526d569a94a9bcd92  bin/rk33/rk3399_ddr_800MHz_v1.30.bin
+ac4babf95a79822936236a7c0f8ef4db16582e109a1c5e23c7ded62509cfdff5  bin/rk33/rk3399_usbplug_v1.30.bin
+17b4dc35fc88f9c9648a5428c5b6453cdd6759f74e90e8dce25f0b22d2db1c03  bin/rk33/rk3399_miniloader_v1.30.bin
+--- merged loader outputs ---
+78e7d3ed43463fe1cc57296855c01c25c9d30e7e64e71913ac62760b61b0407f  /tmp/out/rk3399_loader_v1.30.130.bin

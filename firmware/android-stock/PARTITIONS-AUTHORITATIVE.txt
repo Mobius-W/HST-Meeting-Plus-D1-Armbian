@@ -1,0 +1,40 @@
+# RK3399 MID 权威分区偏移表（Verified 2026-11-10 18:2x）
+#
+# 来源优先级：设备 LBA0 的 Rockchip parameter `mtdparts=` 字段
+#             + 用全盘镜像特征字节实测交叉验证（见下方 verified_by）
+#
+# ★★★ 历史坑（务必牢记）★★★
+#   `rescue/partition-split.txt` 里每一项都比真实值 **多 8192 扇区 (4MB)**，不可用于 wl！
+#   用它刷会导致镜像从分区内 +4MB 处开始写、尾部溢写覆盖下一个分区 —— 这正是
+#   2026-11-10 砖机的真正原因（不是 dm-verity）：
+#     wl 40960(resource)  尾部 4MB 溢出 -> 覆盖 kernel 分区前 4MB
+#     wl 811008(system)   尾部 4MB 溢出 -> 覆盖 metadata/verity_mode/baseparamer/frp
+#
+# ★ rkdeveloptool 的 `wl <BeginSec>` 的 LBA 单位 = 全盘镜像内的字节偏移 / 512，
+#   与 `wl 0 全盘镜像` 的坐标系一致（该操作已实测成功救砖）。
+
+name           start_lba   sectors      bytes          size
+uboot              8192      8192       4194304        4 MiB      verified_by: LBA8192 = "LOADER  " magic
+trust             16384      8192       4194304        4 MiB      verified_by: LBA16384 = "BL3X" magic
+misc              24576      8192       4194304        4 MiB      verified_by: 全零 bootloader_message
+resource          32768     32768      16777216       16 MiB      verified_by: LBA32768 = "RSCE" magic
+kernel            65536     49152      25165824       24 MiB      verified_by: LBA65536 = "KRNL" magic
+boot             114688     65536      33554432       32 MiB      verified_by: ANDROID! boot image
+recovery         180224    131072      67108864       64 MiB
+backup           311296    229376     117440512      112 MiB
+cache            540672    262144     134217728      128 MiB
+system           802816   3145728    1610612736     1536 MiB      verified_by: LBA802816 = ext4 magic 53ef + label "system"
+metadata        3948544     32768      16777216       16 MiB
+verity_mode     3981312        64         32768       32 KiB
+baseparamer     3981376      8192       4194304        4 MiB
+frp             3989568      1024        524288      512 KiB
+userdata        3990592  11373568    5823266816    ~5553 MiB      (open-ended, 到 eMMC 用户区末尾)
+
+# 交叉校验公式：每一行的 start_lba + sectors 必须等于下一行的 start_lba
+#   uboot+trust+misc+resource+kernel+boot+recovery+backup+cache+system+metadata
+#   +verity_mode+baseparamer+frp+userdata = eMMC 用户区总扇区数
+#
+# eMMC 用户区总容量（从 15273600 扇区 = 7,820,083,200 B 全盘镜像反推）
+#   3990592 + 11373568 = 15364160 扇区 ... 全盘镜像为 15273600 扇区
+#   注：全盘镜像长度 15273600 sectors 小于参数表末端，说明全盘镜像只抓到
+#   userdata 实际使用部分之前；wl 0 写入时以镜像长度为准，不影响前段分区。

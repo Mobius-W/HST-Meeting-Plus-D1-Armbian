@@ -1,5 +1,22 @@
-dist/
-dist-linux/
+# 大体积编译产物（无法入库，产物由 CI artifact 提供）
+dist/*.zip
+dist/v24/*.deb
+dist-linux/*.img
+dist-linux/Image
+dist-linux/initramfs.cpio.gz
+
+# 测试中间数据（音频/图像临时文件）
+dist/audio-hp-test/*.wav
+dist/audio-hp-test/*.yuv
+dist/audio-loopback/*.wav
+dist/camera/captures/*.yuv
+dist/camera/captures/*.raw
+
+# macOS 垃圾文件
+.DS_Store
+**/.DS_Store
+
+# 第三方二进制 / 解压缓存
 *.apk
 busybox.arm64
 bbroot/
