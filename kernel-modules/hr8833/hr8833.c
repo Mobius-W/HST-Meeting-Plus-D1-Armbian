@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * hr8833.c - AT8833 / HR8833 双 H 桥单轴云台电机驱动（v2 诊断版）
+ * hr8833.c - AT8833 / HR8833 双 H 桥单轴云台电机驱动（v2.2 定位语义版）
  *
  * 目标板：RK3399 视频会议一体机（视维 fsmeeting / rk3399-mid）
  *
@@ -23,7 +23,40 @@
  *   nSLEEP    GPIO2_A4   ACTIVE_LOW（逻辑 1 = 休眠，逻辑 0 = 工作）
  *   nFAULT    GPIO2_A5   ACTIVE_LOW，开漏 + PULL_UP（逻辑 1 = 故障）
  *
- * ── v2 相对 v1 的改动 ────────────────────────────────────────────
+ * ── v2.2 相对 v2.1 的改动（定位语义） ─────────────────────────────
+ * 依消费端逆向（docs/云台-消费端-测试工具与会议程序-20261119.md §2/§8.1）
+ * 补齐 vendor App 的定位模型，全部语义与原厂对齐：
+ *
+ * 1) ★ 角度 API：TURN_DEG / GOTO_DEG / GET_POS
+ *    原厂开环模型 = 「角度 × sen 毫秒」脉冲：手动摇杆固定 240 ms=10°，
+ *    声源定位 |角度|×sen（sysprop com.inpor.hstdone.sen，默认 40 ms/度）。
+ *    本驱动内置 sen_ms_per_deg 参数（默认 40，运行时可调），angle>0 =
+ *    vendor 正转（AIN1=0,AIN2=1，即 0x19 语义）。开环无编码器，位置
+ *    靠驱动记账（见 3）。
+ *
+ * 2) ★ 方向约定与 vendor 对齐
+ *    v2.1 的 sysfs speed>0 曾是 AIN1=1（即 vendor 反转），本版改为
+ *    speed>0 = vendor 正转（0x19 同向）。速度符号现与角度符号一致。
+ *
+ * 3) ★ 开环位置记账 + 软限位
+ *    position_deg 按「实际通电毫秒 ÷ sen」累积（不是计划值：被 OCP
+ *    打断的脉冲只计实际导通时长）。vendor 0x19/0x1a 直驱时长不可知，
+ *    期间 position_valid=false，position_reset 后重新有效。
+ *    limit_min_deg/limit_max_deg（默认相等=禁用）：超限的增量被裁剪到
+ *    边界，不是拒绝——与原厂"转到头就停在头"的物理行为一致。
+ *
+ * 4) ★ OCP 状态机（默认开启，ocp_autocoast=1）
+ *    nFAULT 拉低时：立即 coast（AIN=00，不切 nSLEEP——保持故障可见，
+ *    这是 v2.1 §14.3 的教训）、取消未到的定时停机、按实际时长记账、
+ *    连续 ocp_trip_limit 次（默认 5）转 fault_latched（-EIO 拒绝新
+ *    启动，fault_clear/position_reset 清除）；两次启动间距 < ocp_retry_ms
+ *    拒绝（-EAGAIN）。芯片自身 tDEG=1.5 µs 已自保，软件 coast 是双保险
+ *    + 语义闭环（等价 vendor App "到时发 0x18"）。
+ *
+ * 5) vendor 兼容层原样保留（0x18/0x19/0x1a 纯 GPIO、不读 arg、不切
+ *    nSLEEP），与 v2.1 逐位一致。
+ *
+ * ── v2.1 相对 v1 的改动 ──────────────────────────────────────────
  * 1) ★ 新增 nFAULT 中断统计（本驱动最重要的诊断能力）
  *    v1 只能靠用户态 12 µs 轮询，而 AT8833 的 OCP 重试窗口只有
  *    ~1.5 µs，弱上拉 RC 使上升沿几乎不可见，轮询必然读成"恒低"，
@@ -42,22 +75,34 @@
  *    唤醒后等待 tWAKE 上限的 2 倍（2 ms）再给方向；停机时先把两个
  *    方向脚拉低（coast），再拉低 nSLEEP，避免带电切换。
  *
- * 4) ★ 启动前故障自愈 + 可观测
- *    若启动瞬间 nFAULT 已是低，先切一次 nSLEEP 复位并重试；仍为低
- *    则判定持续故障、拒绝输出并返回 -EIO。sysfs 记录复位次数。
+ * 4) ★ 启动前故障自愈 + 可观测（auto_reset，默认关）
  *
  * 用户态接口：
  *   /dev/hr8833  (misc 0666)
- *     HR8833_IOC_RUN   {s32 speed; u32 ms;}   speed 符号=方向，ms>0 定时停
+ *     HR8833_IOC_RUN       {s32 speed; u32 ms;}   原始直驱（speed 符号=方向）
  *     HR8833_IOC_STOP / _WAKE / _SLEEP / _GET_OCP
- *     原厂兼容 magic 'm'：0x18 停, 0x19 正转, 0x1a 反转
+ *     HR8833_IOC_TURN_DEG  {s32 deg}   相对转角，异步（立即返回，定时停）
+ *     HR8833_IOC_GOTO_DEG  {s32 deg}   绝对角度（需 position_valid）
+ *     HR8833_IOC_GET_POS   {s32 deg; s32 valid}
+ *     原厂兼容 magic 'm'：0x18 停, 0x19 正转, 0x1a 反转（arg 忽略）
  *   sysfs
- *     speed       (rw) 非 0 = 按符号方向直驱
- *     sleep_state (rw) 1 = 休眠
- *     ocp         (ro) 当前 nFAULT 逻辑值（1 = 故障）
- *     irq_stat    (ro) fall/rise 计数与 fall 间隔统计（诊断核心）
- *     fault_reset (wo) 写 1 触发一次 nSLEEP 复位
- *     clear_stat  (wo) 写 1 清零统计
+ *     speed        (rw) 非 0 = 按符号方向直驱（v2.2 起正=vendor 正转）
+ *     position     (ro) "deg=<s32> valid=<0|1>" 开环位置
+ *     position_reset (wo) 1 = 归零 + 清故障 + 重新有效
+ *     fault_state  (ro) "latched=%d trips=%llu consecutive=%u cooldown_left_us=%llu"
+ *     fault_clear  (wo) 1 = 解除 fault_latched（不清位置）
+ *     sleep_state  (rw) 1 = 休眠
+ *     ocp          (ro) 当前 nFAULT 逻辑值（1 = 故障）
+ *     irq_stat     (ro) fall/rise 计数与 fall 间隔统计（诊断核心）
+ *     fault_reset  (wo) 写 1 触发一次 nSLEEP 复位
+ *     clear_stat   (wo) 写 1 清零中断统计
+ *   module params (/sys/module/hr8833/parameters/)
+ *     sen_ms_per_deg (int, 40)    角度→毫秒 系数（vendor sysprop 同源）
+ *     limit_min_deg / limit_max_deg (int, 0/0=禁用)  软限位
+ *     ocp_autocoast  (bool, Y)    nFAULT 时自动 coast
+ *     ocp_retry_ms   (uint, 200)  故障后再次启动的最小间隔
+ *     ocp_trip_limit (uint, 5)    连续跳闸次数 → fault_latched
+ *     auto_reset     (bool, N)    启动前 nSLEEP 复位（诊断期保持关）
  */
 
 #include <linux/kernel.h>
@@ -79,6 +124,7 @@
 #include <linux/irq.h>
 #include <linux/err.h>
 #include <linux/of.h>
+#include <linux/math64.h>
 
 /* nSLEEP 拉高到 H 桥可用：手册 tWAKE 0.2–1 ms，取 2 倍余量 */
 #define HR8833_WAKE_MS		2
@@ -97,6 +143,30 @@ static bool auto_reset;
 module_param(auto_reset, bool, 0644);
 MODULE_PARM_DESC(auto_reset, "Cycle nSLEEP when nFAULT is low before start (default 0 = pure direct drive)");
 
+/* ---- v2.2 定位语义参数 ---- */
+static int sen_ms_per_deg = 40;
+module_param(sen_ms_per_deg, int, 0644);
+MODULE_PARM_DESC(sen_ms_per_deg, "vendor sen: ms per degree for angle API (default 40 = com.inpor.hstdone.sen)");
+
+static int limit_min_deg;
+static int limit_max_deg;
+module_param(limit_min_deg, int, 0644);
+module_param(limit_max_deg, int, 0644);
+MODULE_PARM_DESC(limit_min_deg, "soft limit (deg); min==max disables limits (default)");
+MODULE_PARM_DESC(limit_max_deg, "soft limit (deg); min==max disables limits (default)");
+
+static bool ocp_autocoast = true;
+module_param(ocp_autocoast, bool, 0644);
+MODULE_PARM_DESC(ocp_autocoast, "coast outputs when nFAULT asserts while driving (default Y)");
+
+static uint ocp_retry_ms = 200;
+module_param(ocp_retry_ms, uint, 0644);
+MODULE_PARM_DESC(ocp_retry_ms, "min gap between starts after an OCP trip (ms)");
+
+static uint ocp_trip_limit = 5;
+module_param(ocp_trip_limit, uint, 0644);
+MODULE_PARM_DESC(ocp_trip_limit, "consecutive trips before fault_latched (0 = never latch)");
+
 struct hr8833_cmd {
 	__s32 speed;	/* 负 = 反转，正 = 正转，0 = 停止 */
 	__u32 ms;	/* >0：运行 ms 毫秒后自动停机；0 = 一直转 */
@@ -108,6 +178,15 @@ struct hr8833_cmd {
 #define HR8833_IOC_WAKE		_IO(HR8833_IOC_MAGIC, 3)
 #define HR8833_IOC_SLEEP	_IO(HR8833_IOC_MAGIC, 4)
 #define HR8833_IOC_GET_OCP	_IOR(HR8833_IOC_MAGIC, 5, int)
+
+/* v2.2 定位语义 */
+struct hr8833_pos {
+	__s32 deg;	/* 开环位置估计（上电/position_reset 为 0） */
+	__s32 valid;	/* vendor 直驱期间为 0（时长不可知） */
+};
+#define HR8833_IOC_TURN_DEG	_IOW(HR8833_IOC_MAGIC, 6, __s32) /* 相对转角，异步 */
+#define HR8833_IOC_GOTO_DEG	_IOW(HR8833_IOC_MAGIC, 7, __s32) /* 绝对角度 */
+#define HR8833_IOC_GET_POS	_IOR(HR8833_IOC_MAGIC, 8, struct hr8833_pos)
 
 /*
  * 原厂 Android ioctl 兼容层（2026-11-16 由 vendor 内核反汇编确认）。
@@ -143,6 +222,16 @@ struct hr8833 {
 	bool sleep_state;
 
 	struct delayed_work stop_work;
+
+	/* ---- v2.2 定位语义 / OCP 状态机 ---- */
+	s32 position_deg;	/* 开环位置（度，+ = vendor 正转方向） */
+	bool position_valid;
+	bool fault_latched;	/* ocp_trip_limit 次连续跳闸后置位 */
+	u32 consecutive_trips;
+	u64 trips_total;
+	u64 last_trip_ns;	/* 最近一次跳闸时刻（cooldown 用） */
+	int active_sign;	/* 当前通电方向（0 = 空闲） */
+	s64 drive_started_ns;	/* 本段通电起点 */
 
 	/* ---- nFAULT 中断统计 ---- */
 	u64 irq_fall;
@@ -217,12 +306,31 @@ static int hr8833_fault_reset(struct hr8833 *h)
 
 /* ---------------- 状态机 ---------------- */
 
+/*
+ * 把"本段通电"折算进开环位置：只计实际导通时长（被 OCP 打断时
+ * elapsed < 计划值），单位 = elapsed_ms / sen_ms_per_deg。
+ * 调用者必须持有 h->lock。
+ */
+static void __hr8833_bookkeep(struct hr8833 *h)
+{
+	if (!h->active_sign)
+		return;
+	if (h->position_valid && sen_ms_per_deg > 0) {
+		s64 el_ns = ktime_get_ns() - h->drive_started_ns;
+
+		h->position_deg += h->active_sign *
+			(s32)div_s64(el_ns, (s64)sen_ms_per_deg * 1000000);
+	}
+	h->active_sign = 0;
+}
+
 /* 调用者必须持有 h->lock */
 static void __hr8833_stop(struct hr8833 *h)
 {
 	h->running = false;
 	h->speed = 0;
 	cancel_delayed_work(&h->stop_work);
+	__hr8833_bookkeep(h);
 	hr8833_sleep(h);
 }
 
@@ -244,16 +352,19 @@ static int __hr8833_start(struct hr8833 *h, int speed, unsigned int ms)
 			return ret;	/* 持续故障：不输出，避免反复大电流 */
 	}
 
+	/* v2.2 方向与 vendor 对齐：speed>0 = 正转 = AIN1=0,AIN2=1（0x19 语义） */
 	if (speed > 0) {
-		gpiod_set_value(h->ain1, 1);
-		gpiod_set_value(h->ain2, 0);
-	} else {
 		gpiod_set_value(h->ain1, 0);
 		gpiod_set_value(h->ain2, 1);
+	} else {
+		gpiod_set_value(h->ain1, 1);
+		gpiod_set_value(h->ain2, 0);
 	}
 
 	h->speed = speed;
 	h->running = true;
+	h->active_sign = (speed > 0) ? 1 : -1;
+	h->drive_started_ns = ktime_get_ns();
 
 	cancel_delayed_work(&h->stop_work);
 	if (ms)
@@ -262,6 +373,57 @@ static int __hr8833_start(struct hr8833 *h, int speed, unsigned int ms)
 	dev_dbg(h->dev, "start speed=%d ms=%u sleep=%d\n",
 		speed, ms, h->sleep_state);
 	return 0;
+}
+
+/*
+ * v2.2 角度 API：|deg| × sen_ms_per_deg 的定时脉冲（vendor 开环模型）。
+ * deg>0 = vendor 正转（0x19）。absolute 时以 position_deg 为基准。
+ * 软限位：增量裁剪到边界（原厂"转到头停在头"的物理行为）。
+ * fault_latched → -EIO；跳闸冷却期内 → -EAGAIN；运行中 → -EBUSY。
+ */
+static int __hr8833_turn_deg(struct hr8833 *h, s32 deg, bool absolute)
+{
+	unsigned int ms;
+	int sign;
+
+	if (h->running)
+		return -EBUSY;
+
+	if (absolute) {
+		if (!h->position_valid)
+			return -ENODATA;
+		deg = deg - h->position_deg;
+	}
+	if (deg == 0)
+		return 0;
+
+	if (sen_ms_per_deg <= 0)
+		return -EINVAL;		/* 非法 sen：宁可拒绝也不乱算 */
+
+	if (limit_min_deg != limit_max_deg) {
+		s32 target = clamp_t(s32, h->position_deg + deg,
+				     limit_min_deg, limit_max_deg);
+
+		deg = target - h->position_deg;
+		if (deg == 0)
+			return 0;
+	}
+
+	if (h->fault_latched)
+		return -EIO;
+
+	if (h->last_trip_ns) {
+		u64 since = ktime_get_ns() - h->last_trip_ns;
+
+		if (since < (u64)ocp_retry_ms * 1000000ULL)
+			return -EAGAIN;
+	}
+
+	deg = clamp_t(s32, deg, -100000, 100000);	/* 防 ms 溢出 */
+	ms = (unsigned int)abs(deg) * (unsigned int)sen_ms_per_deg;
+	sign = (deg > 0) ? 1 : -1;
+
+	return __hr8833_start(h, sign, ms);
 }
 
 static void hr8833_stop_work(struct work_struct *work)
@@ -311,6 +473,46 @@ static irqreturn_t hr8833_ocp_isr(int irq, void *data)
 	}
 	spin_unlock_irqrestore(&h->slock, flags);
 
+	return IRQ_WAKE_THREAD;
+}
+
+/*
+ * v2.2 OCP 状态机（threaded irq，可睡眠）：
+ * 通电中 nFAULT 拉低 ⇒ 立即 coast（不切 nSLEEP——保持故障可见），
+ * 按实际导通时长记账，累计连续跳闸次数，达到 ocp_trip_limit 后
+ * fault_latched 拒绝新启动。芯片自身 tDEG=1.5 µs 已先一步断输出，
+ * 软件 coast 是双保险 + 语义闭环（= vendor App "到时发 0x18"）。
+ */
+static irqreturn_t hr8833_ocp_thread(int irq, void *data)
+{
+	struct hr8833 *h = data;
+
+	mutex_lock(&h->lock);
+	if (gpiod_get_value(h->ocp) > 0 && h->active_sign) {
+		if (ocp_autocoast) {
+			dev_warn_ratelimited(h->dev,
+				"OCP while driving (sign=%d pos=%d): coast\n",
+				h->active_sign, h->position_deg);
+			cancel_delayed_work(&h->stop_work);
+			__hr8833_bookkeep(h);
+			hr8833_pins_idle(h);
+			h->running = false;
+			h->speed = 0;
+			h->consecutive_trips++;
+			h->trips_total++;
+			h->last_trip_ns = ktime_get_ns();
+			if (ocp_trip_limit &&
+			    h->consecutive_trips >= ocp_trip_limit &&
+			    !h->fault_latched) {
+				h->fault_latched = true;
+				dev_err(h->dev,
+					"OCP x%u -> fault latched (clear: fault_clear or position_reset)\n",
+					h->consecutive_trips);
+			}
+		}
+	}
+	mutex_unlock(&h->lock);
+
 	return IRQ_HANDLED;
 }
 
@@ -327,12 +529,15 @@ static int hr8833_open(struct inode *inode, struct file *file)
 /*
  * 原厂兼容：纯 GPIO 直驱（复刻 vendor hr8833_ioctl）。
  * 与 v1 的区别：不再取消 hrtimer（已移除），但仍走完整 waking 时序。
+ * v2.2：直驱期间 position_valid=false（时长不可知），OCP 状态机
+ * 照常生效（autocoast 开时同样会被 coast，与 App 的 0x18 行为一致）。
  */
 static int __hr8833_vendor_gpio(struct hr8833 *h, int ain1, int ain2)
 {
 	h->running = false;
 	h->speed = 0;
 	cancel_delayed_work(&h->stop_work);
+	__hr8833_bookkeep(h);	/* 结束上一段可记账的通电（若有） */
 
 	/*
 	 * 0x18：vendor 语义 = 只把 AIN1/AIN2 拉低（惰行 / coast），
@@ -341,9 +546,13 @@ static int __hr8833_vendor_gpio(struct hr8833 *h, int ain1, int ain2)
 	 * nFAULT 会被释放，看起来就像「故障消失」，会掩盖真实故障。
 	 */
 	if (ain1 == 0 && ain2 == 0) {
+		h->active_sign = 0;
 		hr8833_pins_idle(h);
 		return 0;
 	}
+
+	/* vendor 直驱时长不可知 ⇒ 位置失效，直到 position_reset */
+	h->position_valid = false;
 
 	hr8833_wake(h);
 
@@ -357,6 +566,10 @@ static int __hr8833_vendor_gpio(struct hr8833 *h, int ain1, int ain2)
 	/* 原厂极性：forward = AIN2 高，reverse = AIN1 高 */
 	gpiod_set_value(h->ain1, ain1);
 	gpiod_set_value(h->ain2, ain2);
+	h->running = true;
+	h->speed = (ain2 == 1) ? 1 : -1;	/* v2.2 与 vendor 方向一致 */
+	h->active_sign = h->speed;
+	h->drive_started_ns = ktime_get_ns();
 	return 0;
 }
 
@@ -391,6 +604,27 @@ static long hr8833_ioctl(struct file *file, unsigned int cmd,
 		if (put_user(ocp, (int __user *)arg))
 			ret = -EFAULT;
 		break;
+	case HR8833_IOC_TURN_DEG:
+	case HR8833_IOC_GOTO_DEG: {
+		s32 deg;
+
+		if (copy_from_user(&deg, (void __user *)arg, sizeof(deg))) {
+			ret = -EFAULT;
+			break;
+		}
+		ret = __hr8833_turn_deg(h, deg,
+					cmd == HR8833_IOC_GOTO_DEG);
+		break;
+	}
+	case HR8833_IOC_GET_POS: {
+		struct hr8833_pos p;
+
+		p.deg = h->position_deg;
+		p.valid = h->position_valid ? 1 : 0;
+		if (copy_to_user((void __user *)arg, &p, sizeof(p)))
+			ret = -EFAULT;
+		break;
+	}
 	case HR8833_VENDOR_IOC_ENABLE:	/* 0x18 停 */
 		ret = __hr8833_vendor_gpio(h, 0, 0);
 		break;
@@ -561,8 +795,101 @@ static ssize_t clear_stat_store(struct device *dev,
 }
 static DEVICE_ATTR_WO(clear_stat);
 
+/* ---- v2.2 定位语义 / OCP 状态机 sysfs ---- */
+
+static ssize_t position_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	struct hr8833 *h = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "deg=%d valid=%d\n",
+			  h->position_deg, h->position_valid ? 1 : 0);
+}
+static DEVICE_ATTR_RO(position);
+
+static ssize_t position_reset_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct hr8833 *h = dev_get_drvdata(dev);
+	int val, ret;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+	if (!val)
+		return count;
+
+	mutex_lock(&h->lock);
+	if (h->running)
+		__hr8833_stop(h);
+	h->position_deg = 0;
+	h->position_valid = true;
+	h->fault_latched = false;
+	h->consecutive_trips = 0;
+	h->last_trip_ns = 0;
+	mutex_unlock(&h->lock);
+
+	dev_info(dev, "position reset to 0 (fault cleared)\n");
+	return count;
+}
+static DEVICE_ATTR_WO(position_reset);
+
+static ssize_t fault_state_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct hr8833 *h = dev_get_drvdata(dev);
+	bool latched;
+	u32 consecutive;
+	u64 trips, left_us = 0;
+
+	mutex_lock(&h->lock);
+	latched = h->fault_latched;
+	trips = h->trips_total;
+	consecutive = h->consecutive_trips;
+	if (h->last_trip_ns) {
+		u64 since = ktime_get_ns() - h->last_trip_ns;
+		u64 need = (u64)ocp_retry_ms * 1000000ULL;
+
+		left_us = (since < need) ? (need - since) / 1000 : 0;
+	}
+	mutex_unlock(&h->lock);
+
+	return sysfs_emit(buf,
+			  "latched=%d trips=%llu consecutive=%u cooldown_left_us=%llu\n",
+			  latched ? 1 : 0, trips, consecutive, left_us);
+}
+static DEVICE_ATTR_RO(fault_state);
+
+static ssize_t fault_clear_store(struct device *dev,
+				 struct device_attribute *attr,
+				 const char *buf, size_t count)
+{
+	struct hr8833 *h = dev_get_drvdata(dev);
+	int val, ret;
+
+	ret = kstrtoint(buf, 0, &val);
+	if (ret)
+		return ret;
+	if (!val)
+		return count;
+
+	mutex_lock(&h->lock);
+	h->fault_latched = false;
+	h->consecutive_trips = 0;
+	mutex_unlock(&h->lock);
+
+	dev_info(dev, "fault latch cleared\n");
+	return count;
+}
+static DEVICE_ATTR_WO(fault_clear);
+
 static struct attribute *hr8833_attrs[] = {
 	&dev_attr_speed.attr,
+	&dev_attr_position.attr,
+	&dev_attr_position_reset.attr,
+	&dev_attr_fault_state.attr,
+	&dev_attr_fault_clear.attr,
 	&dev_attr_sleep_state.attr,
 	&dev_attr_ocp.attr,
 	&dev_attr_irq_stat.attr,
@@ -591,6 +918,9 @@ static int hr8833_probe(struct platform_device *pdev)
 	mutex_init(&h->lock);
 	spin_lock_init(&h->slock);
 	h->sleep_state = true;
+	h->position_valid = true;	/* 上电位置约定为 0° */
+	h->active_sign = 0;
+	h->fault_latched = false;
 
 	h->ain1 = devm_gpiod_get(dev, "ain1", GPIOD_OUT_LOW);
 	if (IS_ERR(h->ain1))
@@ -615,12 +945,13 @@ static int hr8833_probe(struct platform_device *pdev)
 
 	INIT_DELAYED_WORK(&h->stop_work, hr8833_stop_work);
 
-	/* ---- nFAULT 中断注册（诊断核心） ---- */
+	/* ---- nFAULT 中断注册（诊断核心 + OCP 状态机） ---- */
 	if (h->ocp) {
 		h->ocp_irq = gpiod_to_irq(h->ocp);
 		if (h->ocp_irq > 0) {
 			ret = devm_request_threaded_irq(
-				dev, h->ocp_irq, hr8833_ocp_isr, NULL,
+				dev, h->ocp_irq, hr8833_ocp_isr,
+				hr8833_ocp_thread,
 				IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING |
 					IRQF_SHARED,
 				"hr8833-nfault", h);
@@ -660,8 +991,10 @@ static int hr8833_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	dev_info(dev, "AT8833 gimbal ready (/dev/hr8833, ocp=%d, irq=%d)\n",
-		 gpiod_get_value(h->ocp) > 0 ? 1 : 0, h->ocp_irq);
+	dev_info(dev,
+		 "AT8833 gimbal v2.2 ready (/dev/hr8833, pos=0 deg, ocp=%d, irq=%d, sen=%d ms/deg)\n",
+		 gpiod_get_value(h->ocp) > 0 ? 1 : 0, h->ocp_irq,
+		 sen_ms_per_deg);
 	return 0;
 }
 
@@ -693,6 +1026,6 @@ static struct platform_driver hr8833_driver = {
 };
 module_platform_driver(hr8833_driver);
 
-MODULE_DESCRIPTION("AT8833/HR8833 single-axis gimbal motor driver (v2 diag)");
+MODULE_DESCRIPTION("AT8833/HR8833 single-axis gimbal driver: angle API + OCP state machine (v2.2)");
 MODULE_AUTHOR("rk3399-mid bring-up");
 MODULE_LICENSE("GPL");
