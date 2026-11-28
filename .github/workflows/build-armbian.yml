@@ -13,9 +13,9 @@ on:
       release:
         description: "用户空间发行版"
         required: false
-        default: "noble"
+        default: "trixie"
         type: choice
-        options: [noble, trixie, bookworm]
+        options: [trixie, noble, bookworm]
       desktop:
         description: "是否构建桌面版（默认 minimal CLI）"
         required: false
@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   build:
-    name: Armbian rk3399-mid (${{ inputs.release || 'noble' }})
+    name: Armbian rk3399-mid (${{ inputs.release || 'trixie' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -94,7 +94,7 @@ jobs:
       - name: Preflight - verify kernel patches apply in order
         run: |
           set -euo pipefail
-          KVER=6.18.63
+          KVER=7.3.3
           TREE="$RUNNER_TEMP/kpreflight"
           mkdir -p "$TREE/drivers/misc" "$TREE/drivers/media/i2c"
           BASE="https://raw.githubusercontent.com/gregkh/linux/v${KVER}"
@@ -108,7 +108,7 @@ jobs:
           echo "=== applying userpatches SEQUENTIALLY onto linux v${KVER} ==="
           # 必须逐个真正 apply（累积到工作树），不能用 --check 逐个独立检查：
           # 历史 bug 正是"单独 apply 都 OK、顺序 apply 第二个 Makefile hunk 失配"。
-          for p in build/userpatches/kernel/archive/rockchip64-6.18/*.patch; do
+          for p in build/userpatches/kernel/archive/rockchip64-7.3/*.patch; do
             echo "--- $(basename "$p")"
             git -C "$TREE" apply "$GITHUB_WORKSPACE/$p"
           done
@@ -121,11 +121,11 @@ jobs:
           cd build
           ./compile.sh build \
             BOARD=rk3399-mid \
-            BRANCH=current \
-            RELEASE="${{ inputs.release || 'noble' }}" \
+            BRANCH=edge \
+            RELEASE="${{ inputs.release || 'trixie' }}" \
             BUILD_DESKTOP="${{ inputs.desktop && 'yes' || 'no' }}" \
             BUILD_MINIMAL="${{ inputs.desktop && 'no' || 'yes' }}" \
-            KERNELBRANCH=tag:v6.18.63 \
+            KERNELBRANCH=tag:v7.3.3 \
             KERNEL_CONFIGURE=no \
             COMPRESS_OUTPUTIMAGE=img \
             SHARE_LOG=yes \
@@ -175,9 +175,9 @@ jobs:
             exit 1
           fi
           mkdir -p kpkg && dpkg-deb -x "$KDEB" kpkg
-          KCFG=$(find kpkg -name 'config-6.18*' | head -1 || true)
+          KCFG=$(find kpkg -name 'config-7.3*' | head -1 || true)
           if [ -z "$KCFG" ]; then
-            echo "::error::内核 deb 里没有 config-6.18*"
+            echo "::error::内核 deb 里没有 config-7.3*"
             exit 1
           fi
           echo "--- 使用 $KCFG"

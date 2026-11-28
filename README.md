@@ -210,7 +210,7 @@ rkdeveloptool rd
 │   └── userpatches/kernel/archive/rockchip64-6.18/*.patch
 ├── kernel-modules/
 │   ├── es7243/                     # ES7243 麦阵 ADC 驱动
-│   ├── hr8833/                     # AT8833/HR8833 云台驱动 v2.1
+│   ├── hr8833/                     # AT8833 云台驱动（纯净版：仅 vendor ioctl，无诊断/状态机）
 │   └── gpioprobe/                  # GPIO 调试工具
 ├── overlay/rk3399-mid-camera-regs.dts  # 摄像头寄存器覆盖
 ├── tools/                          # 构建、测试、诊断脚本

@@ -36,8 +36,13 @@ BOARD_MAINTAINER="Mobius-W"
 INTRODUCED="2026"
 
 # ---- 内核 ---------------------------------------------------------------
-KERNEL_TARGET="current"
-KERNEL_TEST_TARGET="current"
+# 2026-11-28 切 edge（Linux 7.3）：与 wf7000a 的 7.3.3-edge 对齐。
+# 官方 rockchip64_common.inc: current=6.18, edge=7.3, bleedingedge=7.4。
+# 两个自研内核补丁（es7243 / imx307）已在主线 v7.3.3 实测干净 apply；
+# rkisp1 符号 VIDEO_ROCKCHIP_ISP1 在 7.3 未改名、目录仍是 drivers/media/platform/rockchip/rkisp1。
+# current 保留作为回退分支（6.18.63 镜像仍是已知可工作的基线）。
+KERNEL_TARGET="current,edge"
+KERNEL_TEST_TARGET="edge"
 
 # ---- U-Boot：官方 rockpi-4b.csc 原样 ------------------------------------
 BOOTCONFIG="rock-pi-4-rk3399_defconfig"
@@ -49,7 +54,7 @@ BOOTCONFIG="rock-pi-4-rk3399_defconfig"
 BOOT_SOC="rk3399"
 
 # ---- 内核设备树：本板专用，替换官方 rock-pi-4b --------------------------
-# 源码 userpatches/kernel/archive/rockchip64-6.18/dt/rk3399-mid.dts
+# 源码 userpatches/kernel/archive/rockchip64-7.3/dt/rk3399-mid.dts
 # radxa conf 的 post_config_uboot_target hook 会把它同时写进 U-Boot 的
 # CONFIG_DEFAULT_FDT_FILE（与官方 rockpi-4b 行为一致）；内核 DTB 由
 # armbianEnv.txt / boot.scr 从 /boot/dtb/ 加载。
