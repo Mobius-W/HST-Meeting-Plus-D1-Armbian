@@ -94,10 +94,13 @@ jobs:
       - name: Preflight - verify kernel patches apply in order
         run: |
           set -euo pipefail
-          KVER=7.3.3
+          # 与 Armbian edge 默认同源：branch:linux-7.3.y（滚动 stable）。
+          # 2026-11-28 教训：钉死 tag:v7.3.3 会让 Armbian 自带 7.3 补丁集
+          # (rk3562 RGA2e / rk3588 dw-hdmi-qp) 失配 -> 2 patches failed。
+          KREF=linux-7.3.y
           TREE="$RUNNER_TEMP/kpreflight"
           mkdir -p "$TREE/drivers/misc" "$TREE/drivers/media/i2c"
-          BASE="https://raw.githubusercontent.com/gregkh/linux/v${KVER}"
+          BASE="https://raw.githubusercontent.com/gregkh/linux/${KREF}"
           curl -fsSL "$BASE/drivers/misc/Makefile"        -o "$TREE/drivers/misc/Makefile"
           curl -fsSL "$BASE/drivers/misc/Kconfig"         -o "$TREE/drivers/misc/Kconfig"
           curl -fsSL "$BASE/drivers/media/i2c/Makefile"   -o "$TREE/drivers/media/i2c/Makefile"
@@ -105,7 +108,7 @@ jobs:
           git -C "$TREE" init -q
           git -C "$TREE" add -A
           git -C "$TREE" -c user.email=a@b -c user.name=ci commit -qm base
-          echo "=== applying userpatches SEQUENTIALLY onto linux v${KVER} ==="
+          echo "=== applying userpatches SEQUENTIALLY onto gregkh/linux ${KREF} ==="
           # 必须逐个真正 apply（累积到工作树），不能用 --check 逐个独立检查：
           # 历史 bug 正是"单独 apply 都 OK、顺序 apply 第二个 Makefile hunk 失配"。
           for p in build/userpatches/kernel/archive/rockchip64-7.3/*.patch; do
@@ -125,7 +128,7 @@ jobs:
             RELEASE="${{ inputs.release || 'trixie' }}" \
             BUILD_DESKTOP="${{ inputs.desktop && 'yes' || 'no' }}" \
             BUILD_MINIMAL="${{ inputs.desktop && 'no' || 'yes' }}" \
-            KERNELBRANCH=tag:v7.3.3 \
+            KERNELBRANCH=branch:linux-7.3.y \
             KERNEL_CONFIGURE=no \
             COMPRESS_OUTPUTIMAGE=img \
             SHARE_LOG=yes \
@@ -169,9 +172,9 @@ jobs:
           # 教训：scripts/config 塞进去的符号若依赖不满足，Kconfig 会让它整行消失，
           # 构建照样 success、日志里还可能有空壳 built-in.a 造成假阳性。
           # 这里在产物 deb 里逐项硬校验，不满足直接 fail，避免又白等 70 分钟 + 800MB 下载。
-          KDEB=$(ls output/debs/linux-image-current-rockchip64_*.deb 2>/dev/null | head -1 || true)
+          KDEB=$(ls output/debs/linux-image-edge-rockchip64_*.deb 2>/dev/null | head -1 || true)
           if [ -z "$KDEB" ]; then
-            echo "::error::没找到 linux-image-current-rockchip64 deb，无法校验内核配置"
+            echo "::error::没找到 linux-image-edge-rockchip64 deb（BRANCH=edge 命名），无法校验内核配置"
             exit 1
           fi
           mkdir -p kpkg && dpkg-deb -x "$KDEB" kpkg
